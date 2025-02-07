@@ -1,0 +1,51 @@
+# required
+xoscar>=0.4.4 # 基础框架依赖
+gradio==4.26.0
+typer[all]<0.12.0  # fix typer required by gradio
+pillow
+click
+tqdm>=4.27
+tabulate
+requests
+pydantic>2 # 数据验证
+fastapi>=0.110.3  # API 服务
+uvicorn # ASGI 服务器
+huggingface-hub>=0.19.4
+typing_extensions # 类型提示支持
+modelscope>=1.10.0
+sse_starlette>=1.6.5  # ensure_bytes API break change: https://github.com/sysid/sse-starlette/issues/65
+openai>=1.40.0  # For typing
+python-jose[cryptography]
+passlib[bcrypt]
+aioprometheus[starlette]>=23.12.0
+nvidia-ml-py # GPU 监控
+async-timeout # 异步超时控制
+peft
+opencv-contrib-python-headless
+setproctitle
+
+# all
+transformers>=4.46.0 # Transformers 核心依赖
+accelerate>=0.28.0 # 加速推理
+sentencepiece # 分词器支持
+transformers_stream_generator
+bitsandbytes
+protobuf  # 序列化支持
+einops # 张量操作
+tiktoken>=0.6.0
+sentence-transformers>=3.1.0
+controlnet_aux
+orjson
+# auto-gptq  #<0.2.6 python3.12 not support  # autoawq 0.2.6 pinned torch to 2.3
+optimum
+attrdict  # For deepseek VL
+timm>=0.9.16  # For deepseek VL
+torchvision  # For deepseek VL
+FlagEmbedding  # For rerank
+boto3>=1.28.55,<1.28.65 # For tensorizer
+tensorizer~=2.9.0
+imageio-ffmpeg  # For video
+eva-decord  # For video in VL
+qwen-vl-utils!=0.0.9 # For qwen2-vl
+datamodel_code_generator # for minicpm-4B
+jsonschema # for minicpm-4B
