@@ -361,6 +361,16 @@ class ModelActor(xo.StatelessActor, CancelMixin):
                     },
                 )
             )
+            coros.append(
+                self.record_metrics(
+                    "generate_throughput_total_counter",
+                    "add",
+                    {
+                        "labels": self._metrics_labels,
+                        "value": generate_throughput,
+                    },
+                )
+            )
         await asyncio.gather(*coros)
 
     async def _get_worker_ref(self) -> xo.ActorRefType["WorkerActor"]:

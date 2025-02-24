@@ -37,6 +37,10 @@ input_tokens_total_counter = Counter(
 output_tokens_total_counter = Counter(
     "xinference:output_tokens_total_counter", "Total number of output tokens."
 )
+# additional
+generate_throughput_total_counter = Gauge(
+    "xinference:generate_tokens_per_s_total_counter", "Cumulative generate throughput in tokens/s."
+)
 
 
 def record_metrics(name, op, kwargs):

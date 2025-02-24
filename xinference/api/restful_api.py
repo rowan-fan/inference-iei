@@ -1955,6 +1955,8 @@ class RESTfulAPI(CancelMixin):
 
         raw_kwargs = {k: v for k, v in raw_body.items() if k not in exclude}
         kwargs = body.dict(exclude_unset=True, exclude=exclude)
+        if kwargs.get("stream"):
+            kwargs["stream_options"] = {"include_usage": "True"}
 
         # guided_decoding params
         kwargs.update(self.extract_guided_params(raw_body=raw_body))
