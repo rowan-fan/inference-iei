@@ -252,5 +252,13 @@
     "max_tokens": 8192,
     "language": ["89 languages supported"],
     "model_id": "jinaai/jina-clip-v2"
+  },
+  {
+    "model_name": "Yuan-embedding-1.0",
+    "dimensions": 1792,
+    "max_tokens": 512,
+    "language": ["zh"],
+    "model_id": "iei/Yuan-embedding-1.0",
+    "model_revision": "1b543b301eb63dd32914b56d939db2a972df15d5"
   }
 ]
