@@ -54,6 +54,7 @@ from .llm_family import (
     _get_cache_dir,
     get_cache_status,
 )
+from .reasoning_parsers.abs_reasoning_parsers import ReasoningParser
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +322,7 @@ class ChatModelMixin:
     def _to_chat_completion_chunks(
         cls,
         chunks: Iterator[CompletionChunk],
+        reasoning_parse: Optional[ReasoningParser] = None,
     ) -> Iterator[ChatCompletionChunk]:
         for i, chunk in enumerate(chunks):
             if i == 0:
@@ -365,37 +367,72 @@ class ChatModelMixin:
     async def _async_to_chat_completion_chunks(
         cls,
         chunks: AsyncGenerator[CompletionChunk, None],
+        reasoning_parser: Optional[ReasoningParser] = None,
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
         i = 0
+        previous_text = ""
+        current_text = ""
         async for chunk in chunks:
             if i == 0:
-                yield cls._get_first_chat_completion_chunk(chunk)
-            # usage
-            choices = chunk.get("choices")
-            if not choices:
-                yield cls._get_final_chat_completion_chunk(chunk)
+                chat_chunk = cls._get_first_chat_completion_chunk(chunk)
+            elif not chunk.get("choices"):
+                # usage
+                chat_chunk = cls._get_final_chat_completion_chunk(chunk)
             else:
-                yield cls._to_chat_completion_chunk(chunk)
+                chat_chunk = cls._to_chat_completion_chunk(chunk)
+            if reasoning_parser is not None:
+                choices = chat_chunk.get("choices")
+                if choices is None:
+                    continue
+                for choice in choices:
+                    delta = choice.get("delta")
+                    if not delta:
+                        continue
+                    current_text = previous_text + delta.get("content", "")
+                    choice[
+                        "delta"
+                    ] = reasoning_parser.extract_reasoning_content_streaming(
+                        previous_text=previous_text,
+                        current_text=current_text,
+                        delta=delta,
+                    )
+                    previous_text = current_text
+            yield chat_chunk
             i += 1
 
     @staticmethod
-    def _to_chat_completion(completion: Completion) -> ChatCompletion:
+    def _to_chat_completion(
+        completion: Completion, reasoning_parser: Optional[ReasoningParser] = None
+    ) -> ChatCompletion:
+        choices = []
+        for i, choice in enumerate(completion["choices"]):
+            content = choice["text"]
+            reasoning_content = None
+
+            if reasoning_parser is not None:
+                reasoning_content, content = reasoning_parser.extract_reasoning_content(  # type: ignore
+                    choice
+                )
+
+            message = {"role": "assistant", "content": content}
+
+            # add only reasoning_content is None
+            if reasoning_content is not None:
+                message["reasoning_content"] = reasoning_content
+
+            choices.append(
+                {
+                    "index": i,
+                    "message": message,
+                    "finish_reason": choice["finish_reason"],
+                }
+            )
         return {
             "id": "chat" + completion["id"],
             "object": "chat.completion",
             "created": completion["created"],
             "model": completion["model"],
-            "choices": [
-                {
-                    "index": i,
-                    "message": {
-                        "role": "assistant",
-                        "content": choice["text"],
-                    },
-                    "finish_reason": choice["finish_reason"],
-                }
-                for i, choice in enumerate(completion["choices"])
-            ],
+            "choices": choices,  # type: ignore
             "usage": completion["usage"],
         }
 
