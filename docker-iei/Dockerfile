@@ -1,4 +1,4 @@
-FROM xinference-iei:v1.3.0.post2-0.7.3-0.4.3
+FROM xinference-iei:v1.3.0.post2-0.7.3-0.4.3-cpu
 
 ADD ./xinference /usr/local/lib/python3.10/dist-packages/xinference
 

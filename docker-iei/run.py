@@ -79,12 +79,25 @@ class NvidiaManager(AcceleratorManager):
             FileNotFoundError: If NVIDIA driver path not found
         """
         try:
+            # 首先检查路径是否存在
+            if not os.path.exists(self._gpu_path):
+                logging.error(f"Path not found: {self._gpu_path}")
+                return 0
+                
+            # 检查是否有GPU设备文件
             count = len([name for name in os.listdir(self._gpu_path) 
                         if os.path.isdir(os.path.join(self._gpu_path, name))])
+            
+            # 额外验证：检查是否可以访问/dev/nvidia*设备
+            nvidia_devices = [dev for dev in os.listdir("/dev") if dev.startswith("nvidia") and not dev.endswith("ctl")]
+            if not nvidia_devices:
+                logging.warning("Found GPU paths in /proc but no accessible /dev/nvidia* devices. This may indicate GPU driver paths are mounted but GPUs are not accessible.")
+                return 0
+                
             logging.info(f"Found {count} NVIDIA GPUs")
             return count
-        except FileNotFoundError:
-            logging.error(f"Path not found: {self._gpu_path}")
+        except (FileNotFoundError, PermissionError) as e:
+            logging.error(f"GPU detection error: {str(e)}")
             return 0
             
     def allocate_accelerators(self, model_type: str, required_count: int = 1, gpu_idxs: List[int] = None) -> tuple[int, list[int]]:
@@ -571,11 +584,25 @@ class ModelLauncher:
             n_gpu = len(gpu_idxs)
             gpu_idx = gpu_idxs
         else:
-            n_gpu, gpu_idx = self.accelerator_manager.allocate_accelerators(
-                model_type=model_type,
-                required_count=1
-            )
-            n_gpu = n_gpu if n_gpu > 0 else 'auto'
+            try:
+                # Check if we're using CPU manager
+                if isinstance(self.accelerator_manager, CpuManager):
+                    n_gpu = 'auto'  # Set to 'auto' for CPU mode
+                    gpu_idx = []
+                    logging.info("Using CPU mode, setting n_gpu to 'auto'")
+                else:
+                    n_gpu, gpu_idx = self.accelerator_manager.allocate_accelerators(
+                        model_type=model_type,
+                        required_count=1
+                    )
+                    # If no GPUs available or allocation returned 0, set to 'auto'
+                    if n_gpu == 0:
+                        n_gpu = 'auto'
+                        logging.info("No GPUs allocated, setting n_gpu to 'auto'")
+            except Exception as e:
+                logging.warning(f"GPU allocation failed: {str(e)}, falling back to CPU mode")
+                n_gpu = 'auto'
+                gpu_idx = []
             
         # Base parameters
         launch_params = {
@@ -584,7 +611,7 @@ class ModelLauncher:
             "model_type": self.args.model_type or model_type,
             "n_gpu": n_gpu,
             "gpu_idx": gpu_idx,
-            "model_path": model_config.get("modelPath", "/mnt/models")
+            "model_path": model_config.get("modelPath", "/mnt/models") or "/mnt/models"
         }
         
         # Model specific parameters
