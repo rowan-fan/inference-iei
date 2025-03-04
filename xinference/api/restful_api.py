@@ -73,9 +73,34 @@ from ..types import (
 )
 from .oauth2.auth_service import AuthService
 from .oauth2.types import LoginUserForm
+from ..utils_iei import direct_probe_async, start_background_probe
 
 logger = logging.getLogger(__name__)
 
+# Global reference to the background probe task
+_background_probe_task = None
+
+async def start_global_background_probe():
+    """
+    Start the background probe task at the global scope if not already running.
+    
+    This function ensures that only one background probe task is running
+    in the application at any time.
+    """
+    global _background_probe_task
+    
+    # Don't start if already running
+    if _background_probe_task is not None:
+        logger.info("Global background probe task already running")
+        return
+    
+    try:
+        # Start the background probe task
+        start_background_probe()
+        _background_probe_task = True  # Mark as started
+        logger.info("Global background probe task started successfully")
+    except Exception as e:
+        logger.warning(f"Failed to start global background probe task: {e}")
 
 class JSONResponse(StarletteJSONResponse):  # type: ignore # noqa: F811
     def render(self, content: Any) -> bytes:
@@ -778,6 +803,11 @@ class RESTfulAPI(CancelMixin):
                 if self.is_authenticated()
                 else None
             ),
+        )
+        self._router.add_api_route(
+            "/iei/probe",
+            self.probe,
+            methods=["GET"],
         )
 
         if XINFERENCE_DISABLE_METRICS:
@@ -2321,6 +2351,41 @@ class RESTfulAPI(CancelMixin):
         except Exception as e:
             logger.error(e, exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+
+    async def probe(self) -> JSONResponse:
+        """
+        Health check endpoint for Kubernetes liveness probe.
+        
+        This endpoint ensures quick response for Kubernetes health checks by:
+        1. Starting the background probe task if not already running
+        2. Using cached probe results when available
+        3. Returning appropriate HTTP status codes
+        
+        Returns:
+            JSONResponse: Status response with result field
+            
+        Raises:
+            HTTPException: 503 Service Unavailable if health check fails
+        """
+        try:
+            # Ensure background probe task is running
+            await start_global_background_probe()
+            
+            # Use cached results for quick response
+            res = await direct_probe_async()
+            
+            # For Kubernetes probes, we need to fail with appropriate status code
+            if not res:
+                # Return 503 Service Unavailable to indicate unhealthy state
+                raise HTTPException(status_code=503, detail="Health check failed: models not ready or service unhealthy")
+                
+            return JSONResponse(content={"status": "healthy", "result": res})
+        except HTTPException:
+            # Re-raise HTTP exceptions with their original status code
+            raise
+        except Exception as e:
+            logger.error(f"Health probe failed: {e}", exc_info=True)
+            raise HTTPException(status_code=503, detail=str(e))
 
     @staticmethod
     def extract_guided_params(raw_body: dict) -> dict:
