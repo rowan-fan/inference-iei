@@ -6,7 +6,7 @@ ENV NVM_DIR /usr/local/nvm
 ENV NODE_VERSION 14.21.1
 
 RUN apt-get -y update \
-  && apt install -y build-essential curl procps git libgl1 ffmpeg \
+  && apt install -y build-essential curl procps git libgl1 \
   && mkdir -p $NVM_DIR \
   && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash \
   && . $NVM_DIR/nvm.sh \
@@ -26,8 +26,14 @@ RUN python -m pip install --upgrade -i "$PIP_INDEX" pip && \
     python setup.py build_web && \
     git restore . && \
     pip install -i "$PIP_INDEX" --no-deps "." && \
+    pip install -i "$PIP_INDEX" xllamacpp && \
     # clean packages
     pip cache purge
+
+RUN /opt/conda/bin/conda create -n ffmpeg-env -c conda-forge 'ffmpeg<7' -y && \
+    ln -s /opt/conda/envs/ffmpeg-env/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    ln -s /opt/conda/envs/ffmpeg-env/bin/ffprobe /usr/local/bin/ffprobe && \
+    /opt/conda/bin/conda clean --all -y
 
 ENTRYPOINT []
 CMD ["/bin/bash"]
