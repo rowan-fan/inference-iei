@@ -148,23 +148,23 @@ done &
 main_pid=$!
 
 # Step 7: Start health check monitoring
-(
-  failure_count=0
-  while true; do
-    if ! python3 probe.py; then
-      ((failure_count++))
-      echo "[MONITOR] Health check failed. Failure count: $failure_count"
-      if [ $failure_count -ge 3 ]; then
-        echo "[MONITOR] Health check failed 3 times, killing process..."
-        kill -9 $main_pid
-        exit 1
-      fi
-    else
-      failure_count=0
-    fi
-    sleep 60  # Run health check every minute
-  done
-) 2>&1 | sed 's/^/[MONITOR] /' &
+# (
+#   failure_count=0
+#   while true; do
+#     if ! python3 probe.py; then
+#       ((failure_count++))
+#       echo "[MONITOR] Health check failed. Failure count: $failure_count"
+#       if [ $failure_count -ge 3 ]; then
+#         echo "[MONITOR] Health check failed 3 times, killing process..."
+#         kill -9 $main_pid
+#         exit 1
+#       fi
+#     else
+#       failure_count=0
+#     fi
+#     sleep 60  # Run health check every minute
+#   done
+# ) 2>&1 | sed 's/^/[MONITOR] /' &
 
 # Step 8: Wait for all background processes to complete
 wait

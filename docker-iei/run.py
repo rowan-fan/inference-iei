@@ -548,12 +548,16 @@ class ModelLauncher:
 
         # Select engine based on format
         if model_format.lower() in ['pytorch', 'gptq', 'awq']:
-            if n_gpu == 0 or n_gpu == "auto" and 'Transformers' in engine_list:
+            if (n_gpu == 0 or n_gpu == "auto") and 'Transformers' in engine_list:
                 return 'Transformers'
-            if 'vLLM' in engine_list and os.environ.get("open_acceleration") == "True":
+            if 'SGLang' in engine_list and os.environ.get("open_acceleration") == "True":
+                return 'SGLang'
+            elif 'vLLM' in engine_list and os.environ.get("open_acceleration") == "True":
                 return 'vLLM'
             elif 'Transformers' in engine_list:
                 return 'Transformers'
+            elif 'SGLang' in engine_list and os.environ.get("open_acceleration") == "False":
+                return 'SGLang'
             elif 'vLLM' in engine_list and os.environ.get("open_acceleration") == "False":
                 return 'vLLM'
         elif model_format.lower() == 'ggufv2':
