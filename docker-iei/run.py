@@ -550,16 +550,16 @@ class ModelLauncher:
         if model_format.lower() in ['pytorch', 'gptq', 'awq']:
             if (n_gpu == 0 or n_gpu == "auto") and 'Transformers' in engine_list:
                 return 'Transformers'
-            if 'SGLang' in engine_list and os.environ.get("open_acceleration") == "True":
-                return 'SGLang'
-            elif 'vLLM' in engine_list and os.environ.get("open_acceleration") == "True":
+            if 'vLLM' in engine_list and os.environ.get("open_acceleration") == "True":
                 return 'vLLM'
+            elif 'SGLang' in engine_list and os.environ.get("open_acceleration") == "True":
+                return 'SGLang'
             elif 'Transformers' in engine_list:
                 return 'Transformers'
-            elif 'SGLang' in engine_list and os.environ.get("open_acceleration") == "False":
-                return 'SGLang'
             elif 'vLLM' in engine_list and os.environ.get("open_acceleration") == "False":
                 return 'vLLM'
+            elif 'SGLang' in engine_list and os.environ.get("open_acceleration") == "False":
+                return 'SGLang'
         elif model_format.lower() == 'ggufv2':
             if 'llama.cpp' in engine_list:
                 return 'llama.cpp'
@@ -753,6 +753,20 @@ for instance in instances:
                            headers=headers, json=llm_payload, timeout=30)
         if resp.status_code != 200:
             raise Exception("LLM service error")
+            
+    elif "generate" in ability:
+        # Check Generate service
+        gen_payload = {
+            "model": model_id,
+            "prompt": "Hello.",
+            "max_tokens": 1,
+            "temperature": 0.7,
+            "stream": False
+        }
+        resp = requests.post(address + "/v1/completions",
+                           headers=headers, json=gen_payload, timeout=30)
+        if resp.status_code != 200:
+            raise Exception("Generate service error")
             
     elif "embed" in ability:
         # Check Embedding service
