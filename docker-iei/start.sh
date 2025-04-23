@@ -43,6 +43,126 @@ replace_environments() {
   done
 }
 
+
+# Initialize MACA and CUDA environment
+init_maca_environment() {
+    echo "Initializing MACA and CUDA environment..."
+
+    # 1. MACA related paths
+    export MACA_PATH="${MACA_PATH:-/opt/maca}"
+    export MACA_CLANG_PATH="$MACA_PATH/mxgpu_llvm/bin"
+
+    # 2. CUDA related paths
+    export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
+    export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
+
+    # 3. Update PATH
+    export PATH="$MACA_PATH/bin:\
+$MACA_PATH/mxgpu_llvm/bin:\
+$MACA_PATH/ompi/bin:\
+$MACA_PATH/ucx/bin:\
+$CUDA_PATH/bin:\
+$CUDA_PATH/tools:\
+$PATH"
+
+    # 4. Update LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH="$MACA_PATH/mxgpu_llvm/lib:\
+$MACA_PATH/ompi/lib:\
+$MACA_PATH/lib:\
+$MACA_PATH/ucx/lib:\
+/opt/conda/envs/pytorch/lib/python3.8/site-packages/torch_tensorglue/csrc/lib:\
+/opt/conda/envs/pytorch/lib/python3.8/site-packages/torch/lib:\
+$LD_LIBRARY_PATH"
+
+    # 5. Validate critical paths
+    local required_dirs=(
+        "$MACA_PATH"
+        "$CUDA_PATH"
+        "$MACA_PATH/mxgpu_llvm"
+        "$MACA_PATH/ompi"
+        "$MACA_PATH/ucx"
+    )
+
+    for dir in "${required_dirs[@]}"; do
+        if [ ! -d "$dir" ]; then
+            echo "Error: Required directory not found: $dir"
+            return 1
+        fi
+    done
+
+    # 6. Source TensorGlue backend configuration
+    if [ -d "/etc/tensorglue_backend" ]; then
+        local current_dir=$(pwd)
+        cd /etc/tensorglue_backend
+        if [ -f "env.sh" ]; then
+            source env.sh
+        else
+            echo "Warning: TensorGlue env.sh not found"
+        fi
+        cd "$current_dir"
+    else
+        echo "Warning: TensorGlue backend directory not found"
+    fi
+
+    echo "MACA and CUDA environment initialized successfully"
+    return 0
+}
+
+
+# Initialize and activate conda environment if it exists
+setup_conda_environment() {
+  # Return early if CONDA_ENV is not set
+  if [ -z "$CONDA_ENV" ]; then
+    echo "No conda environment specified, skipping conda activation"
+    return 0
+  fi
+
+  # Get conda initialization script path
+  local CONDA_PATH="${CONDA_PATH:-/opt/conda}"
+  local CONDA_SETUP="$CONDA_PATH/etc/profile.d/conda.sh"
+
+  # Skip if conda setup script doesn't exist
+  if [ ! -f "$CONDA_SETUP" ]; then
+    echo "Conda setup script not found at $CONDA_SETUP, skipping conda activation"
+    return 0
+  fi
+
+  echo "Setting up conda environment..."
+
+  # Initialize conda
+  source "$CONDA_SETUP"
+
+  # Try to activate the specified environment
+  echo "Activating conda environment: $CONDA_ENV"
+  if ! conda activate "$CONDA_ENV" 2>/dev/null; then
+    echo "Warning: Failed to activate conda environment $CONDA_ENV, continuing without conda environment"
+    return 0
+  fi
+
+  echo "Successfully activated conda environment: $CONDA_ENV"
+}
+
+
+set_mx_cuda_visible_deivces() {
+  # Get GPU count and set CUDA_VISIBLE_DEVICES
+  local gpu_count=0
+  if [ -d "/dev/dri" ]; then
+    gpu_count=$(ls /dev/dri/renderD* 2>/dev/null | wc -l)
+  fi
+
+  if [ "$gpu_count" -gt 0 ]; then
+    # Create comma-separated list of GPU indices (0 to gpu_count-1)
+    local gpu_list=$(seq -s ',' 0 $((gpu_count-1)))
+    export CUDA_VISIBLE_DEVICES=$gpu_list
+    echo "Setting CUDA_VISIBLE_DEVICES=$gpu_list"
+  # else
+  #   echo "No MX GPUs found, running without GPU acceleration"
+  #   export CUDA_VISIBLE_DEVICES=""
+  fi
+}
+
+set_mx_cuda_visible_deivces
+
 # Start xinference local server with specified port
 # Args:
 #   PORT: The port number for xinference server, default is 8080
@@ -57,9 +177,17 @@ start_xinference_server() {
   echo "Metrics port: ${METRICS_PORT:-39997}"
   echo "Log file: ${1:-server.log}"
   echo "Executing command: $server_command"
-  
+
   # 使用 tee 命令将输出同时写入文件和标准输出，并通过 sed 添加前缀
   $server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
+  
+  # if [ -n "$CONDA_ENV" ] && [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+    
+  #   CUDA_VISIBLE_DEVICES=$gpu_list $server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
+  # else
+    
+  # fi
+
   
   # 获取最后一个后台进程的PID
   local server_pid=$!
@@ -121,6 +249,14 @@ add_arg() {
 # Step 1: Parse command-line arguments and replace environments
 replace_environments "$@"
 
+if [ -n "$CONDA_ENV" ]; then
+  # Step 2: Setup conda environment
+  setup_conda_environment
+
+  # Step 3: Initialize MACA environment
+  init_maca_environment
+fi
+
 # Step 2: Start the xinference server
 start_xinference_server
 
@@ -146,25 +282,6 @@ $command 2>&1 | while IFS= read -r line; do
     echo "[RAG] $line"
 done &
 main_pid=$!
-
-# Step 7: Start health check monitoring
-# (
-#   failure_count=0
-#   while true; do
-#     if ! python3 probe.py; then
-#       ((failure_count++))
-#       echo "[MONITOR] Health check failed. Failure count: $failure_count"
-#       if [ $failure_count -ge 3 ]; then
-#         echo "[MONITOR] Health check failed 3 times, killing process..."
-#         kill -9 $main_pid
-#         exit 1
-#       fi
-#     else
-#       failure_count=0
-#     fi
-#     sleep 60  # Run health check every minute
-#   done
-# ) 2>&1 | sed 's/^/[MONITOR] /' &
 
 # Step 8: Wait for all background processes to complete
 wait
