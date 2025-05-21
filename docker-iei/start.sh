@@ -152,7 +152,7 @@ set_mx_cuda_visible_deivces() {
 
   if [ "$gpu_count" -gt 0 ]; then
     # Create comma-separated list of GPU indices (0 to gpu_count-1)
-    local gpu_list=$(seq -s ',' 0 $((gpu_count-1)))
+    gpu_list=$(seq -s ',' 0 $((gpu_count-1)))
     export CUDA_VISIBLE_DEVICES=$gpu_list
     echo "Setting CUDA_VISIBLE_DEVICES=$gpu_list"
   # else
@@ -170,7 +170,7 @@ set_mx_cuda_visible_deivces
 #   METRICS_PORT: The metrics exporter port, default is 39997
 # Returns: None
 start_xinference_server() {
-  local server_command="/usr/local/bin/xinference-local --host 0.0.0.0 --port ${PORT:-8080} --metrics-exporter-port ${METRICS_PORT:-39997}"
+  local server_command="xinference-local --host 0.0.0.0 --port ${PORT:-8080} --metrics-exporter-port ${METRICS_PORT:-39997}"
   
   echo "Starting xinference server..."
   echo "Server port: ${PORT:-8080}"
@@ -178,15 +178,14 @@ start_xinference_server() {
   echo "Log file: ${1:-server.log}"
   echo "Executing command: $server_command"
 
+  #$server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
   # 使用 tee 命令将输出同时写入文件和标准输出，并通过 sed 添加前缀
-  $server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
-  
-  # if [ -n "$CONDA_ENV" ] && [ -n "$CUDA_VISIBLE_DEVICES" ]; then
-    
-  #   CUDA_VISIBLE_DEVICES=$gpu_list $server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
-  # else
-    
-  # fi
+  if [ -n "$CONDA_ENV" ] && [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+    echo $gpu_list
+    CUDA_VISIBLE_DEVICES=$gpu_list $server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
+  else
+    $server_command 2>&1 | tee "${1:-server.log}" | sed 's/^/[XINFERENCE] /' &
+  fi
 
   
   # 获取最后一个后台进程的PID

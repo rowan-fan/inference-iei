@@ -1,0 +1,12 @@
+#FROM tensorglue_extension_c500_2.29.0.19_pytorch_ubuntu22.04:v2.5.0-2025-05-14-conda
+FROM tensorglue_extension_c500_2.29.0.19_pytorch_ubuntu22.04:v2.5.0-2025-05-15-conda-with-paddle-manual
+
+ADD ./xinference /opt/conda/envs/pytorch/lib/python3.10/site-packages/xinference
+
+RUN  conda run -n pytorch pip install xoscar==0.6.2 pynvml==12.0.0 aioprometheus==23.12.0 python-jose[cryptography] passlib[bcrypt] modelscope==1.25.0 tabulate==0.9.0  qwen-vl-utils==0.0.11 boto3==1.38.2 sentence-transformers 
+
+WORKDIR /workspace
+ADD docker-iei/run.py /workspace/run.py
+ADD docker-iei/start.sh /workspace/start.sh
+ADD docker-iei/sensitive_server /workspace/sensitive_server
+ENV CONDA_ENV=pytorch

@@ -682,6 +682,7 @@ class ModelLauncher:
         if not [m for m in model_list if not m['model_name'] == model_name]:
             raise Exception("No matching model found")
         engine_list = self.client.query_engine_by_model_name(model_name)
+        print(f"engline list : {engine_list}")
 
         # Validate specified engine
         if self.args.model_engine:
