@@ -90,7 +90,7 @@ def test_RESTful_client(setup):
                     "role" in chunk["choices"][0]["delta"]
                 )
             else:
-                assert chunk["choices"][0]["delta"] == {}
+                assert chunk["choices"][0]["delta"] == {"content": ""}
 
     _check_stream()
 
@@ -163,10 +163,6 @@ def test_RESTful_client(setup):
 
     client.terminate_model(model_uid=model_uid2)
     assert len(client.list_models()) == 0
-
-
-def test_RESTful_client_xllamacpp(set_use_xllamacpp, setup):
-    test_RESTful_client(setup)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Skip windows")

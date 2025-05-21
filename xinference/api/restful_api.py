@@ -56,6 +56,7 @@ from ..constants import (
     XINFERENCE_DEFAULT_CANCEL_BLOCK_DURATION,
     XINFERENCE_DEFAULT_ENDPOINT_PORT,
     XINFERENCE_DISABLE_METRICS,
+    XINFERENCE_SSE_PING_ATTEMPTS_SECONDS,
 )
 from ..core.event import Event, EventCollectorActor, EventType
 from ..core.supervisor import SupervisorActor
@@ -226,13 +227,13 @@ class BuildGradioInterfaceRequest(BaseModel):
     model_lang: List[str]
 
 
-class BuildGradioImageInterfaceRequest(BaseModel):
+class BuildGradioMediaInterfaceRequest(BaseModel):
     model_type: str
     model_name: str
     model_family: str
     model_id: str
     controlnet: Union[None, List[Dict[str, Union[str, dict, None]]]]
-    model_revision: str
+    model_revision: Optional[str]
     model_ability: List[str]
 
 
@@ -377,7 +378,27 @@ class RESTfulAPI(CancelMixin):
         )
         self._router.add_api_route(
             "/v1/ui/images/{model_uid}",
-            self.build_gradio_images_interface,
+            self.build_gradio_media_interface,
+            methods=["POST"],
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:read"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        self._router.add_api_route(
+            "/v1/ui/audios/{model_uid}",
+            self.build_gradio_media_interface,
+            methods=["POST"],
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:read"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        self._router.add_api_route(
+            "/v1/ui/videos/{model_uid}",
+            self.build_gradio_media_interface,
             methods=["POST"],
             dependencies=(
                 [Security(self._auth_service, scopes=["models:read"])]
@@ -487,6 +508,26 @@ class RESTfulAPI(CancelMixin):
             "/v1/models/{model_uid}",
             self.terminate_model,
             methods=["DELETE"],
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:stop"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        self._router.add_api_route(
+            "/v1/models/{model_uid}/progress",
+            self.get_launch_model_progress,
+            methods=["GET"],
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:read"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        self._router.add_api_route(
+            "/v1/models/{model_uid}/cancel",
+            self.cancel_launch_model,
+            methods=["POST"],
             dependencies=(
                 [Security(self._auth_service, scopes=["models:stop"])]
                 if self.is_authenticated()
@@ -673,6 +714,17 @@ class RESTfulAPI(CancelMixin):
         self._router.add_api_route(
             "/v1/video/generations",
             self.create_videos,
+            methods=["POST"],
+            response_model=VideoList,
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:read"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        self._router.add_api_route(
+            "/v1/video/generations/image",
+            self.create_videos_from_images,
             methods=["POST"],
             response_model=VideoList,
             dependencies=(
@@ -1054,6 +1106,10 @@ class RESTfulAPI(CancelMixin):
         except RuntimeError as re:
             logger.error(str(re), exc_info=True)
             raise HTTPException(status_code=503, detail=str(re))
+        except asyncio.CancelledError as ce:
+            # cancelled by user
+            logger.error(str(ce), exc_info=True)
+            raise HTTPException(status_code=499, detail=str(ce))
         except Exception as e:
             logger.error(str(e), exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -1073,6 +1129,26 @@ class RESTfulAPI(CancelMixin):
             logger.error(str(e), exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
         return JSONResponse(content=infos)
+
+    async def get_launch_model_progress(self, model_uid: str) -> JSONResponse:
+        try:
+            progress = await (
+                await self._get_supervisor_ref()
+            ).get_launch_builtin_model_progress(model_uid)
+        except Exception as e:
+            logger.error(str(e), exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(content={"progress": progress})
+
+    async def cancel_launch_model(self, model_uid: str) -> JSONResponse:
+        try:
+            await (await self._get_supervisor_ref()).cancel_launch_builtin_model(
+                model_uid
+            )
+        except Exception as e:
+            logger.error(str(e), exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(content=None)
 
     async def launch_model_by_version(
         self, request: Request, wait_ready: bool = Query(True)
@@ -1169,16 +1245,16 @@ class RESTfulAPI(CancelMixin):
 
         return JSONResponse(content={"model_uid": model_uid})
 
-    async def build_gradio_images_interface(
+    async def build_gradio_media_interface(
         self, model_uid: str, request: Request
     ) -> JSONResponse:
         """
         Build a Gradio interface for image processing models.
         """
         payload = await request.json()
-        body = BuildGradioImageInterfaceRequest.parse_obj(payload)
+        body = BuildGradioMediaInterfaceRequest.parse_obj(payload)
         assert self._app is not None
-        assert body.model_type == "image"
+        assert body.model_type in ("image", "video", "audio")
 
         # asyncio.Lock() behaves differently in 3.9 than 3.10+
         # A event loop is required in 3.9 but not 3.10+
@@ -1192,12 +1268,12 @@ class RESTfulAPI(CancelMixin):
                 )
                 asyncio.set_event_loop(asyncio.new_event_loop())
 
-        from ..core.image_interface import ImageInterface
+        from ..core.media_interface import MediaInterface
 
         try:
             access_token = request.headers.get("Authorization")
             internal_host = "localhost" if self._host == "0.0.0.0" else self._host
-            interface = ImageInterface(
+            interface = MediaInterface(
                 endpoint=f"http://{internal_host}:{self._port}",
                 model_uid=model_uid,
                 model_family=body.model_family,
@@ -1207,6 +1283,7 @@ class RESTfulAPI(CancelMixin):
                 controlnet=body.controlnet,
                 access_token=access_token,
                 model_ability=body.model_ability,
+                model_type=body.model_type,
             ).build()
 
             gr.mount_gradio_app(self._app, interface, f"/{model_uid}")
@@ -1324,7 +1401,9 @@ class RESTfulAPI(CancelMixin):
                 finally:
                     await model.decrease_serve_count()
 
-            return EventSourceResponse(stream_results())
+            return EventSourceResponse(
+                stream_results(), ping=XINFERENCE_SSE_PING_ATTEMPTS_SECONDS
+            )
         else:
             try:
                 data = await model.generate(body.prompt, kwargs, raw_params=raw_kwargs)
@@ -1544,8 +1623,11 @@ class RESTfulAPI(CancelMixin):
         prompt_speech: Optional[UploadFile] = File(
             None, media_type="application/octet-stream"
         ),
+        prompt_latent: Optional[UploadFile] = File(
+            None, media_type="application/octet-stream"
+        ),
     ) -> Response:
-        if prompt_speech:
+        if prompt_speech or prompt_latent:
             f = await request.form()
         else:
             f = await request.json()
@@ -1569,6 +1651,8 @@ class RESTfulAPI(CancelMixin):
                 parsed_kwargs = {}
             if prompt_speech is not None:
                 parsed_kwargs["prompt_speech"] = await prompt_speech.read()
+            if prompt_latent is not None:
+                parsed_kwargs["prompt_latent"] = await prompt_latent.read()
             out = await model.speech(
                 input=body.input,
                 voice=body.voice,
@@ -1587,7 +1671,9 @@ class RESTfulAPI(CancelMixin):
                         await model.decrease_serve_count()
 
                 return EventSourceResponse(
-                    media_type="application/octet-stream", content=stream_results()
+                    media_type="application/octet-stream",
+                    content=stream_results(),
+                    ping=XINFERENCE_SSE_PING_ATTEMPTS_SECONDS,
                 )
             else:
                 return Response(media_type="application/octet-stream", content=out)
@@ -1956,16 +2042,73 @@ class RESTfulAPI(CancelMixin):
             await self._report_error_event(model_uid, str(e))
             raise HTTPException(status_code=500, detail=str(e))
 
+        request_id = None
         try:
             kwargs = json.loads(body.kwargs) if body.kwargs else {}
+            request_id = kwargs.get("request_id")
+            self._add_running_task(request_id)
             video_list = await model.text_to_video(
                 prompt=body.prompt,
                 n=body.n,
                 **kwargs,
             )
             return Response(content=video_list, media_type="application/json")
+        except asyncio.CancelledError:
+            err_str = f"The request has been cancelled: {request_id}"
+            logger.error(err_str)
+            await self._report_error_event(model_uid, err_str)
+            raise HTTPException(status_code=409, detail=err_str)
         except Exception as e:
             e = await self._get_model_last_error(model.uid, e)
+            logger.error(e, exc_info=True)
+            await self._report_error_event(model_uid, str(e))
+            self.handle_request_limit_error(e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def create_videos_from_images(
+        self,
+        model: str = Form(...),
+        image: UploadFile = File(media_type="application/octet-stream"),
+        prompt: Optional[Union[str, List[str]]] = Form(None),
+        negative_prompt: Optional[Union[str, List[str]]] = Form(None),
+        n: Optional[int] = Form(1),
+        kwargs: Optional[str] = Form(None),
+    ) -> Response:
+        model_uid = model
+        try:
+            model_ref = await (await self._get_supervisor_ref()).get_model(model_uid)
+        except ValueError as ve:
+            logger.error(str(ve), exc_info=True)
+            await self._report_error_event(model_uid, str(ve))
+            raise HTTPException(status_code=400, detail=str(ve))
+        except Exception as e:
+            logger.error(e, exc_info=True)
+            await self._report_error_event(model_uid, str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+
+        request_id = None
+        try:
+            if kwargs is not None:
+                parsed_kwargs = json.loads(kwargs)
+            else:
+                parsed_kwargs = {}
+            request_id = parsed_kwargs.get("request_id")
+            self._add_running_task(request_id)
+            video_list = await model_ref.image_to_video(
+                image=Image.open(image.file),
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                n=n,
+                **parsed_kwargs,
+            )
+            return Response(content=video_list, media_type="application/json")
+        except asyncio.CancelledError:
+            err_str = f"The request has been cancelled: {request_id}"
+            logger.error(err_str)
+            await self._report_error_event(model_uid, err_str)
+            raise HTTPException(status_code=409, detail=err_str)
+        except Exception as e:
+            e = await self._get_model_last_error(model_ref.uid, e)
             logger.error(e, exc_info=True)
             await self._report_error_event(model_uid, str(e))
             self.handle_request_limit_error(e)
@@ -1982,6 +2125,7 @@ class RESTfulAPI(CancelMixin):
             "logit_bias",
             "logit_bias_type",
             "user",
+            "max_completion_tokens",
         }
 
         raw_kwargs = {k: v for k, v in raw_body.items() if k not in exclude}
@@ -1995,6 +2139,9 @@ class RESTfulAPI(CancelMixin):
         # TODO: Decide if this default value override is necessary #1061
         if body.max_tokens is None:
             kwargs["max_tokens"] = max_tokens_field.default
+
+        if body.max_completion_tokens is not None:
+            kwargs["max_tokens"] = body.max_completion_tokens
 
         if body.logit_bias is not None:
             raise HTTPException(status_code=501, detail="Not implemented")
@@ -2101,7 +2248,9 @@ class RESTfulAPI(CancelMixin):
                 finally:
                     await model.decrease_serve_count()
 
-            return EventSourceResponse(stream_results())
+            return EventSourceResponse(
+                stream_results(), ping=XINFERENCE_SSE_PING_ATTEMPTS_SECONDS
+            )
         else:
             try:
                 data = await model.chat(

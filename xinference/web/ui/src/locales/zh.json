@@ -4,7 +4,8 @@
     "runningModels": "运行模型",
     "registerModel": "注册模型",
     "clusterInfo": "集群信息",
-    "contactUs": "联系我们"
+    "contactUs": "联系我们",
+    "documentation": "文档"
   },
 
   "model": {
@@ -24,9 +25,9 @@
     "chat": "聊天",
     "vision": "视觉聊天",
     "reasoning": "推理",
-    "text-to-audio": "text-to-audio",
-    "audio-to-text": "audio-to-text",
-    "audio-to-audio": "audio-to-audio",
+    "text2audio": "text2audio",
+    "audio2text": "audio2text",
+    "audio2audio": "audio2audio",
     "status": "状态",
     "cached": "已缓存",
     "manageCachedModels": "管理缓存模型",
@@ -52,7 +53,8 @@
     "modelFormat": "模型格式",
     "modelSize": "模型大小",
     "quantization": "量化",
-    "nGPU": "GPU 数量",
+    "multimodelProjector": "多模态投影器",
+    "nGPU": "GPU 数量 (每个副本)",
     "nGPUPerWorker": "每个 Worker 上的 GPU 数量",
     "nGpuLayers": "GPU 层数",
     "replica": "副本",
@@ -68,11 +70,13 @@
     "modelPath.optional": "(可选) 模型路径，对于 PyTorch，提供模型目录；对于 GGML/GGUF，提供模型文件路径。",
     "GGUFQuantization.optional": "(可选) GGUF量化格式，对Transformer部分进行量化。",
     "GGUFModelPath.optional": "(可选) GGUF模型路径，应为以 .gguf 结尾的文件。",
+    "enableThinking": "开启思考模式",
     "parsingReasoningContent": "解析推理内容",
     "CPUOffload": "CPU卸载",
     "CPUOffload.tip": "将模型卸载到CPU。当资源有限或使用GGUF选项时，建议启用此功能。",
     "loraConfig": "Lora 配置",
     "loraModelConfig": "Lora 模型配置",
+    "additionalQuantizationParametersForInferenceEngine": "传递给推理引擎的量化参数",
     "additionalParametersForInferenceEngine": "传递给推理引擎的附加参数",
     "enterIntegerGreaterThanZero": "请输入大于 0 的整数。",
     "enterCommaSeparatedNumbers": "请输入以逗号分隔的数字数据，例如：0,1,2",
@@ -99,7 +103,8 @@
     "confirmDeleteCacheFiles": "确认删除缓存文件吗？此操作无法恢复。",
     "commandLineTip": "请确定模型名称是否一致。",
     "featured": "推荐",
-    "all": "全部"
+    "all": "全部",
+    "cancelledSuccessfully": "取消成功!"
   },
 
   "runningModels": {

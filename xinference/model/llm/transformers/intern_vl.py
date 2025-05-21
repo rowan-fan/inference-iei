@@ -19,14 +19,14 @@ from typing import Dict, Iterator, List, Optional, Union
 import torch
 
 from ....types import ChatCompletion, ChatCompletionChunk
-from ..llm_family import LLMFamilyV1, LLMSpecV1
+from ..llm_family import LLMFamilyV1, LLMSpecV1, register_transformer
 from ..utils import (
     _decode_image,
     generate_chat_completion,
     generate_completion_chunk,
     parse_messages,
 )
-from .core import PytorchChatModel, PytorchGenerateConfig
+from .core import PytorchChatModel, PytorchGenerateConfig, register_non_default_model
 from .utils import cache_clean
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,10 @@ def _load_video(video_path, bound=None, input_size=448, max_num=1, num_segments=
     return pixel_values, num_patches_list
 
 
+@register_transformer
+@register_non_default_model(
+    "internvl-chat", "internvl2", "Internvl2.5", "Internvl2.5-MPO", "InternVL3"
+)
 class InternVLChatModel(PytorchChatModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -239,13 +243,11 @@ class InternVLChatModel(PytorchChatModel):
         self._model = None
 
     @classmethod
-    def match(
+    def match_json(
         cls, model_family: "LLMFamilyV1", model_spec: "LLMSpecV1", quantization: str
     ) -> bool:
         family = model_family.model_family or model_family.model_name
         if "internvl" not in family.lower():
-            return False
-        if "pytorch" not in model_spec.model_format:
             return False
         return True
 
@@ -259,6 +261,8 @@ class InternVLChatModel(PytorchChatModel):
     def _split_model(self):
         import math
 
+        from transformers import AutoConfig
+
         device_map = {}
         world_size = torch.cuda.device_count()
         # single gpu
@@ -267,22 +271,26 @@ class InternVLChatModel(PytorchChatModel):
         model_size = f"{self.model_spec.model_size_in_billions}B"
         model_name = self.model_family.model_name.lower().replace("-mpo", "")
         model_name = f"{model_name}-{model_size}"
-        num_layers = {
-            "internvl2-1B": 24,
-            "internvl2-2B": 24,
-            "internvl2-4B": 32,
-            "internvl2-8B": 32,
-            "internvl2-26B": 48,
-            "internvl2-40B": 60,
-            "internvl2-76B": 80,
-            "internvl2.5-1B": 24,
-            "internvl2.5-2B": 24,
-            "internvl2.5-4B": 36,
-            "internvl2.5-8B": 32,
-            "internvl2.5-26B": 48,
-            "internvl2.5-38B": 64,
-            "internvl2.5-78B": 80,
-        }[model_name]
+        if "internvl3" in model_name.lower():
+            config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
+            num_layers = config.llm_config.num_hidden_layers
+        else:
+            num_layers = {
+                "internvl2-1B": 24,
+                "internvl2-2B": 24,
+                "internvl2-4B": 32,
+                "internvl2-8B": 32,
+                "internvl2-26B": 48,
+                "internvl2-40B": 60,
+                "internvl2-76B": 80,
+                "internvl2.5-1B": 24,
+                "internvl2.5-2B": 24,
+                "internvl2.5-4B": 36,
+                "internvl2.5-8B": 32,
+                "internvl2.5-26B": 48,
+                "internvl2.5-38B": 64,
+                "internvl2.5-78B": 80,
+            }[model_name]
 
         # Since the first GPU will be used for ViT, treat it as half a GPU.
         num_layers_per_gpu = math.ceil(num_layers / (world_size - 0.5))
@@ -303,7 +311,7 @@ class InternVLChatModel(PytorchChatModel):
         device_map[f"language_model.model.layers.{num_layers - 1}"] = 0
         return device_map
 
-    def load(self, **kwargs):
+    def load(self):
         from transformers import AutoModel, AutoTokenizer
 
         if self._check_tensorizer_integrity():
@@ -321,10 +329,7 @@ class InternVLChatModel(PytorchChatModel):
         if device is not None:
             kwargs["device_map"] = device
 
-        if "8-bit" in self.quantization.lower():
-            kwargs["load_in_8bit"] = True
-        elif "4-bit" in self.quantization.lower():
-            kwargs["load_in_4bit"] = True
+        kwargs = self.apply_bnb_quantization(kwargs)
 
         self._model = AutoModel.from_pretrained(self.model_path, **kwargs).eval()
 

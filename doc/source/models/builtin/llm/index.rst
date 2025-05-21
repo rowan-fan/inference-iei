@@ -16,21 +16,6 @@ The following is a list of built-in LLM in Xinference:
      - DESCRIPTION
 
 
-   * - :ref:`aquila2 <models_llm_aquila2>`
-     - generate
-     - 2048
-     - Aquila2 series models are the base language models
-
-   * - :ref:`aquila2-chat <models_llm_aquila2-chat>`
-     - chat
-     - 2048
-     - Aquila2-chat series models are the chat models
-
-   * - :ref:`aquila2-chat-16k <models_llm_aquila2-chat-16k>`
-     - chat
-     - 16384
-     - AquilaChat2-16k series models are the long-text chat models
-
    * - :ref:`baichuan-2 <models_llm_baichuan-2>`
      - generate
      - 4096
@@ -40,11 +25,6 @@ The following is a list of built-in LLM in Xinference:
      - chat
      - 4096
      - Baichuan2-chat is a fine-tuned version of the Baichuan LLM, specializing in chatting.
-
-   * - :ref:`c4ai-command-r-v01 <models_llm_c4ai-command-r-v01>`
-     - chat
-     - 131072
-     - C4AI Command-R(+) is a research release of a 35 and 104 billion parameter highly performant generative model.
 
    * - :ref:`code-llama <models_llm_code-llama>`
      - generate
@@ -105,11 +85,6 @@ The following is a list of built-in LLM in Xinference:
      - chat, vision
      - 8192
      - CogVLM2-Video achieves state-of-the-art performance on multiple video question answering tasks.
-
-   * - :ref:`csg-wukong-chat-v0.1 <models_llm_csg-wukong-chat-v0.1>`
-     - chat
-     - 32768
-     - csg-wukong-1B is a 1 billion-parameter small language model(SLM) pretrained on 1T tokens.
 
    * - :ref:`deepseek <models_llm_deepseek>`
      - generate
@@ -176,14 +151,24 @@ The following is a list of built-in LLM in Xinference:
      - 4096
      - DeepSeek-VL possesses general multimodal understanding capabilities, capable of processing logical diagrams, web pages, formula recognition, scientific literature, natural images, and embodied intelligence in complex scenarios.
 
-   * - :ref:`gemma-2-it <models_llm_gemma-2-it>`
+   * - :ref:`deepseek-vl2 <models_llm_deepseek-vl2>`
+     - chat, vision
+     - 4096
+     - DeepSeek-VL2, an advanced series of large Mixture-of-Experts (MoE) Vision-Language Models that significantly improves upon its predecessor, DeepSeek-VL. DeepSeek-VL2 demonstrates superior capabilities across various tasks, including but not limited to visual question answering, optical character recognition, document/table/chart understanding, and visual grounding.
+
+   * - :ref:`fin-r1 <models_llm_fin-r1>`
      - chat
-     - 8192
+     - 131072
+     - Fin-R1 is a large language model specifically designed for the field of financial reasoning
+
+   * - :ref:`gemma-3-1b-it <models_llm_gemma-3-1b-it>`
+     - chat
+     - 32768
      - Gemma is a family of lightweight, state-of-the-art open models from Google, built from the same research and technology used to create the Gemini models.
 
-   * - :ref:`gemma-it <models_llm_gemma-it>`
-     - chat
-     - 8192
+   * - :ref:`gemma-3-it <models_llm_gemma-3-it>`
+     - chat, vision
+     - 131072
      - Gemma is a family of lightweight, state-of-the-art open models from Google, built from the same research and technology used to create the Gemini models.
 
    * - :ref:`glm-4v <models_llm_glm-4v>`
@@ -200,6 +185,11 @@ The following is a list of built-in LLM in Xinference:
      - chat, vision
      - 8192
      - The GLM-Edge series is our attempt to face the end-side real-life scenarios, which consists of two sizes of large-language dialogue models and multimodal comprehension models (GLM-Edge-1.5B-Chat, GLM-Edge-4B-Chat, GLM-Edge-V-2B, GLM-Edge-V-5B). Among them, the 1.5B / 2B model is mainly for platforms such as mobile phones and cars, and the 4B / 5B model is mainly for platforms such as PCs.
+
+   * - :ref:`glm4-0414 <models_llm_glm4-0414>`
+     - chat, tools
+     - 32768
+     - The GLM family welcomes new members, the GLM-4-32B-0414 series models, featuring 32 billion parameters. Its performance is comparable to OpenAI’s GPT series and DeepSeek’s V3/R1 series
 
    * - :ref:`glm4-chat <models_llm_glm4-chat>`
      - chat, tools
@@ -221,45 +211,15 @@ The following is a list of built-in LLM in Xinference:
      - 1024
      - GPT-2 is a Transformer-based LLM that is trained on WebTest, a 40 GB dataset of Reddit posts with 3+ upvotes.
 
-   * - :ref:`internlm2-chat <models_llm_internlm2-chat>`
-     - chat
-     - 32768
-     - The second generation of the InternLM model, InternLM2.
-
-   * - :ref:`internlm2.5-chat <models_llm_internlm2.5-chat>`
-     - chat
-     - 32768
-     - InternLM2.5 series of the InternLM model.
-
-   * - :ref:`internlm2.5-chat-1m <models_llm_internlm2.5-chat-1m>`
-     - chat
-     - 262144
-     - InternLM2.5 series of the InternLM model supports 1M long-context
-
    * - :ref:`internlm3-instruct <models_llm_internlm3-instruct>`
      - chat, tools
      - 32768
      - InternLM3 has open-sourced an 8-billion parameter instruction model, InternLM3-8B-Instruct, designed for general-purpose usage and advanced reasoning.
 
-   * - :ref:`internvl-chat <models_llm_internvl-chat>`
+   * - :ref:`internvl3 <models_llm_internvl3>`
      - chat, vision
-     - 32768
-     - InternVL 1.5 is an open-source multimodal large language model (MLLM) to bridge the capability gap between open-source and proprietary commercial models in multimodal understanding. 
-
-   * - :ref:`internvl2 <models_llm_internvl2>`
-     - chat, vision
-     - 32768
-     - InternVL 2 is an open-source multimodal large language model (MLLM) to bridge the capability gap between open-source and proprietary commercial models in multimodal understanding. 
-
-   * - :ref:`internvl2.5 <models_llm_internvl2.5>`
-     - chat, vision
-     - 16384
-     - InternVL 2.5 is an open-source multimodal large language model (MLLM) to bridge the capability gap between open-source and proprietary commercial models in multimodal understanding. 
-
-   * - :ref:`internvl2.5-mpo <models_llm_internvl2.5-mpo>`
-     - chat, vision
-     - 16384
-     - InternVL 2.5 is an open-source multimodal large language model (MLLM) to bridge the capability gap between open-source and proprietary commercial models in multimodal understanding. 
+     - 8192
+     - InternVL3, an advanced multimodal large language model (MLLM) series that demonstrates superior overall performance.
 
    * - :ref:`llama-2 <models_llm_llama-2>`
      - generate
@@ -421,10 +381,10 @@ The following is a list of built-in LLM in Xinference:
      - 4096
      - Orion-14B series models are open-source multilingual large language models trained from scratch by OrionStarAI.
 
-   * - :ref:`orion-chat-rag <models_llm_orion-chat-rag>`
-     - chat
-     - 4096
-     - Orion-14B series models are open-source multilingual large language models trained from scratch by OrionStarAI.
+   * - :ref:`ovis2 <models_llm_ovis2>`
+     - chat, vision
+     - 32768
+     - Ovis (Open VISion) is a novel Multimodal Large Language Model (MLLM) architecture, designed to structurally align visual and textual embeddings.
 
    * - :ref:`phi-2 <models_llm_phi-2>`
      - generate
@@ -440,11 +400,6 @@ The following is a list of built-in LLM in Xinference:
      - chat
      - 4096
      - The Phi-3-Mini-4k-Instruct is a 3.8 billion-parameter, lightweight, state-of-the-art open model trained using the Phi-3 datasets.
-
-   * - :ref:`platypus2-70b-instruct <models_llm_platypus2-70b-instruct>`
-     - generate
-     - 4096
-     - Platypus-70B-instruct is a merge of garage-bAInd/Platypus2-70B and upstage/Llama-2-70b-instruct-v2.
 
    * - :ref:`qvq-72b-preview <models_llm_qvq-72b-preview>`
      - chat, vision
@@ -521,14 +476,24 @@ The following is a list of built-in LLM in Xinference:
      - 1010000
      - Qwen2.5-1M is the long-context version of the Qwen2.5 series models, supporting a context length of up to 1M tokens.
 
+   * - :ref:`qwen2.5-omni <models_llm_qwen2.5-omni>`
+     - chat, vision, audio, omni
+     - 32768
+     - Qwen2.5-Omni: the new flagship end-to-end multimodal model in the Qwen series.
+
    * - :ref:`qwen2.5-vl-instruct <models_llm_qwen2.5-vl-instruct>`
      - chat, vision
      - 128000
      - Qwen2.5-VL: Qwen2.5-VL is the latest version of the vision language models in the Qwen model familities.
 
+   * - :ref:`qwen3 <models_llm_qwen3>`
+     - chat, reasoning, tools
+     - 40960
+     - Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models. Built upon extensive training, Qwen3 delivers groundbreaking advancements in reasoning, instruction-following, agent capabilities, and multilingual support
+
    * - :ref:`qwq-32b <models_llm_qwq-32b>`
-     - chat, reasoning
-     - 32768
+     - chat, reasoning, tools
+     - 131072
      - QwQ is the reasoning model of the Qwen series. Compared with conventional instruction-tuned models, QwQ, which is capable of thinking and reasoning, can achieve significantly enhanced performance in downstream tasks, especially hard problems. QwQ-32B is the medium-sized reasoning model, which is capable of achieving competitive performance against state-of-the-art reasoning models, e.g., DeepSeek-R1, o1-mini.
 
    * - :ref:`qwq-32b-preview <models_llm_qwq-32b-preview>`
@@ -546,6 +511,11 @@ The following is a list of built-in LLM in Xinference:
      - 8192
      - We introduce SeaLLM-7B-v2.5, the state-of-the-art multilingual LLM for Southeast Asian (SEA) languages
 
+   * - :ref:`seallms-v3 <models_llm_seallms-v3>`
+     - chat
+     - 32768
+     - SeaLLMs - Large Language Models for Southeast Asia
+
    * - :ref:`skywork <models_llm_skywork>`
      - generate
      - 4096
@@ -556,10 +526,10 @@ The following is a list of built-in LLM in Xinference:
      - 4096
      - Skywork is a series of large models developed by the Kunlun Group · Skywork team.
 
-   * - :ref:`starling-lm <models_llm_starling-lm>`
+   * - :ref:`skywork-or1-preview <models_llm_skywork-or1-preview>`
      - chat
-     - 4096
-     - We introduce Starling-7B, an open large language model (LLM) trained by Reinforcement Learning from AI Feedback (RLAIF). The model harnesses the power of our new GPT-4 labeled ranking dataset
+     - 32768
+     - The Skywork-OR1 (Open Reasoner 1) model series consists of powerful math and code reasoning models trained using large-scale rule-based reinforcement learning with carefully designed datasets and training recipes.
 
    * - :ref:`telechat <models_llm_telechat>`
      - chat
@@ -621,37 +591,14 @@ The following is a list of built-in LLM in Xinference:
      - 4096
      - The Yi series models are large language models trained from scratch by developers at 01.AI.
 
-   * - :ref:`yi-coder <models_llm_yi-coder>`
-     - generate
-     - 131072
-     - Yi-Coder is a series of open-source code language models that delivers state-of-the-art coding performance with fewer than 10 billion parameters.Excelling in long-context understanding with a maximum context length of 128K tokens.Supporting 52 major programming languages, including popular ones such as Java, Python, JavaScript, and C++.
-
-   * - :ref:`yi-coder-chat <models_llm_yi-coder-chat>`
-     - chat
-     - 131072
-     - Yi-Coder is a series of open-source code language models that delivers state-of-the-art coding performance with fewer than 10 billion parameters.Excelling in long-context understanding with a maximum context length of 128K tokens.Supporting 52 major programming languages, including popular ones such as Java, Python, JavaScript, and C++.
-
-   * - :ref:`yi-vl-chat <models_llm_yi-vl-chat>`
-     - chat, vision
-     - 4096
-     - Yi Vision Language (Yi-VL) model is the open-source, multimodal version of the Yi Large Language Model (LLM) series, enabling content comprehension, recognition, and multi-round conversations about images.
-
 
 .. toctree::
    :maxdepth: 3
 
   
-   aquila2
-  
-   aquila2-chat
-  
-   aquila2-chat-16k
-  
    baichuan-2
   
    baichuan-2-chat
-  
-   c4ai-command-r-v01
   
    code-llama
   
@@ -676,8 +623,6 @@ The following is a list of built-in LLM in Xinference:
    cogvlm2
   
    cogvlm2-video-llama3-chat
-  
-   csg-wukong-chat-v0.1
   
    deepseek
   
@@ -705,15 +650,21 @@ The following is a list of built-in LLM in Xinference:
   
    deepseek-vl-chat
   
-   gemma-2-it
+   deepseek-vl2
   
-   gemma-it
+   fin-r1
+  
+   gemma-3-1b-it
+  
+   gemma-3-it
   
    glm-4v
   
    glm-edge-chat
   
    glm-edge-v
+  
+   glm4-0414
   
    glm4-chat
   
@@ -723,21 +674,9 @@ The following is a list of built-in LLM in Xinference:
   
    gpt-2
   
-   internlm2-chat
-  
-   internlm2.5-chat
-  
-   internlm2.5-chat-1m
-  
    internlm3-instruct
   
-   internvl-chat
-  
-   internvl2
-  
-   internvl2.5
-  
-   internvl2.5-mpo
+   internvl3
   
    llama-2
   
@@ -803,15 +742,13 @@ The following is a list of built-in LLM in Xinference:
   
    orion-chat
   
-   orion-chat-rag
+   ovis2
   
    phi-2
   
    phi-3-mini-128k-instruct
   
    phi-3-mini-4k-instruct
-  
-   platypus2-70b-instruct
   
    qvq-72b-preview
   
@@ -843,7 +780,11 @@ The following is a list of built-in LLM in Xinference:
   
    qwen2.5-instruct-1m
   
+   qwen2.5-omni
+  
    qwen2.5-vl-instruct
+  
+   qwen3
   
    qwq-32b
   
@@ -853,11 +794,13 @@ The following is a list of built-in LLM in Xinference:
   
    seallm_v2.5
   
+   seallms-v3
+  
    skywork
   
    skywork-math
   
-   starling-lm
+   skywork-or1-preview
   
    telechat
   
@@ -882,11 +825,5 @@ The following is a list of built-in LLM in Xinference:
    yi-200k
   
    yi-chat
-  
-   yi-coder
-  
-   yi-coder-chat
-  
-   yi-vl-chat
   
 

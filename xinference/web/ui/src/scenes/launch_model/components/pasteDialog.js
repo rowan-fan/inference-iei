@@ -4,14 +4,13 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  useTheme,
+  TextField,
 } from '@mui/material'
 import React, { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 const PasteDialog = ({ open, onHandleClose, onHandleCommandLine }) => {
   const { t } = useTranslation()
-  const theme = useTheme()
   const [command, setCommand] = useState('')
 
   const handleClose = () => {
@@ -26,6 +25,7 @@ const PasteDialog = ({ open, onHandleClose, onHandleCommandLine }) => {
       image_lora_load_kwargs: {},
       image_lora_fuse_kwargs: {},
     }
+    const quantizationConfig = {}
     let newcommand = command.replace('xinference launch', '').trim()
     const args =
       newcommand.match(
@@ -59,6 +59,11 @@ const PasteDialog = ({ open, onHandleClose, onHandleCommandLine }) => {
       } else if (normalizedKey === 'image_lora_fuse_kwargs') {
         const [fuse_param, fuse_value] = value.split(/\s+/)
         peftModelConfig.image_lora_fuse_kwargs[fuse_param] = fuse_value
+      } else if (normalizedKey === 'quantization_config') {
+        const quantizationConfigPairs = value.split(/\s+/)
+        const k = quantizationConfigPairs[0]
+        const v = quantizationConfigPairs[1]
+        quantizationConfig[k] = v
       } else {
         if (['cpu_offload', 'reasoning_content'].includes(normalizedKey)) {
           params[normalizedKey] = value === 'true' ? true : false
@@ -78,6 +83,10 @@ const PasteDialog = ({ open, onHandleClose, onHandleCommandLine }) => {
       params.peft_model_config = peftModelConfig
     }
 
+    if (quantizationConfig && Object.keys(quantizationConfig).length > 0) {
+      params.quantization_config = quantizationConfig
+    }
+
     onHandleCommandLine(params)
     handleClose()
   }
@@ -87,17 +96,15 @@ const PasteDialog = ({ open, onHandleClose, onHandleCommandLine }) => {
       <DialogTitle>{t('launchModel.commandLineParsing')}</DialogTitle>
       <DialogContent>
         <div style={{ width: '500px', height: '120px' }}>
-          <textarea
-            className="textarea"
-            style={{
-              height: '100%',
-              color: theme.palette.mode === 'dark' && '#fff',
-            }}
+          <TextField
+            multiline
+            fullWidth
+            rows={5}
+            placeholder={t('launchModel.placeholderTip')}
             value={command}
-            onInput={(e) => {
+            onChange={(e) => {
               setCommand(e.target.value)
             }}
-            placeholder={t('launchModel.placeholderTip')}
           />
         </div>
       </DialogContent>

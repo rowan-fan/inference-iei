@@ -13,12 +13,17 @@
 # limitations under the License.
 
 import asyncio
+import importlib.util
+import itertools
 import json
 import logging
 import multiprocessing
 import os
+import sys
+import threading
 import time
 import uuid
+from functools import partial
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -27,9 +32,13 @@ from typing import (
     List,
     Optional,
     Tuple,
+    Type,
     TypedDict,
     Union,
 )
+
+import xoscar as xo
+from typing_extensions import NotRequired
 
 from ....types import (
     ChatCompletion,
@@ -42,7 +51,7 @@ from ....types import (
     LoRA,
 )
 from .. import LLM, LLMFamilyV1, LLMSpecV1
-from ..llm_family import CustomLLMFamilyV1
+from ..llm_family import CustomLLMFamilyV1, cache_model_tokenizer_and_config
 from ..utils import (
     DEEPSEEK_TOOL_CALL_FAMILY,
     QWEN_TOOL_CALL_FAMILY,
@@ -73,6 +82,10 @@ class VLLMModelConfig(TypedDict, total=False):
     guided_decoding_backend: Optional[str]
     scheduling_policy: Optional[str]
     reasoning_content: bool
+    model_quantization: Optional[str]
+    mm_processor_kwargs: NotRequired[dict[str, Any]]
+    min_pixels: NotRequired[int]
+    max_pixels: NotRequired[int]
 
 
 class VLLMGenerateConfig(TypedDict, total=False):
@@ -157,10 +170,17 @@ if VLLM_INSTALLED and vllm.__version__ >= "0.3.0":
     VLLM_SUPPORTED_CHAT_MODELS.append("qwen2.5-instruct")
     VLLM_SUPPORTED_MODELS.append("qwen2.5-coder")
     VLLM_SUPPORTED_CHAT_MODELS.append("qwen2.5-coder-instruct")
+    VLLM_SUPPORTED_CHAT_MODELS.append("XiYanSQL-QwenCoder-2504")
     VLLM_SUPPORTED_CHAT_MODELS.append("QwQ-32B-Preview")
     VLLM_SUPPORTED_CHAT_MODELS.append("QwQ-32B")
     VLLM_SUPPORTED_CHAT_MODELS.append("marco-o1")
     VLLM_SUPPORTED_CHAT_MODELS.append("deepseek-r1-distill-qwen")
+    VLLM_SUPPORTED_CHAT_MODELS.append("fin-r1")
+    VLLM_SUPPORTED_CHAT_MODELS.append("seallms-v3")
+    VLLM_SUPPORTED_CHAT_MODELS.append("skywork-or1-preview")
+    VLLM_SUPPORTED_CHAT_MODELS.append("skywork-or1")
+    VLLM_SUPPORTED_CHAT_MODELS.append("HuatuoGPT-o1-Qwen2.5")
+    VLLM_SUPPORTED_CHAT_MODELS.append("DianJin-R1")
 
 if VLLM_INSTALLED and vllm.__version__ >= "0.3.2":
     VLLM_SUPPORTED_CHAT_MODELS.append("gemma-it")
@@ -191,11 +211,13 @@ if VLLM_INSTALLED and vllm.__version__ > "0.5.3":
     VLLM_SUPPORTED_CHAT_MODELS.append("llama-3.1-instruct")
     VLLM_SUPPORTED_CHAT_MODELS.append("llama-3.3-instruct")
     VLLM_SUPPORTED_CHAT_MODELS.append("deepseek-r1-distill-llama")
+    VLLM_SUPPORTED_CHAT_MODELS.append("HuatuoGPT-o1-LLaMA-3.1")
 
 if VLLM_INSTALLED and vllm.__version__ >= "0.6.1":
     VLLM_SUPPORTED_VISION_MODEL_LIST.append("internvl2")
     VLLM_SUPPORTED_VISION_MODEL_LIST.append("InternVL2.5")
     VLLM_SUPPORTED_VISION_MODEL_LIST.append("InternVL2.5-MPO")
+    VLLM_SUPPORTED_VISION_MODEL_LIST.append("InternVL3")
 
 if VLLM_INSTALLED and vllm.__version__ >= "0.6.2":
     VLLM_SUPPORTED_CHAT_MODELS.append("minicpm3-4b")
@@ -215,6 +237,16 @@ if VLLM_INSTALLED and vllm.__version__ >= "0.7.2":
 
 if VLLM_INSTALLED and vllm.__version__ >= "0.7.3":
     VLLM_SUPPORTED_CHAT_MODELS.append("qwen2.5-instruct-1m")
+
+if VLLM_INSTALLED and vllm.__version__ >= "0.8.0":
+    VLLM_SUPPORTED_CHAT_MODELS.append("gemma-3-1b-it")
+    VLLM_SUPPORTED_VISION_MODEL_LIST.append("gemma-3-it")
+
+if VLLM_INSTALLED and vllm.__version__ >= "0.8.4":
+    VLLM_SUPPORTED_CHAT_MODELS.append("glm4-0414")
+
+if VLLM_INSTALLED and vllm.__version__ >= "0.8.5":
+    VLLM_SUPPORTED_CHAT_MODELS.append("qwen3")
 
 
 class VLLMModel(LLM):
@@ -244,15 +276,59 @@ class VLLMModel(LLM):
         self.lora_modules = peft_model
         self.lora_requests: List[LoRARequest] = []
         self._xavier_config = None
+        # distributed inference
+        self._device_count = None
+        self._address = model_config.pop("address", None)  # type: ignore
+        self._n_worker = model_config.pop("n_worker", 1)  # type: ignore
+        self._shard = model_config.pop("shard", 0)  # type: ignore
+        self._driver_info = model_config.pop("driver_info", None)  # type: ignore
+        self._loading_thread: Optional[threading.Thread] = None
+        self._loading_error = None
+        # variables used for distributed inference and multiple GPUs
+        self._pool_addresses = None
+        self._worker_addresses: Optional[Dict[int, List[str]]] = None
+        self._all_worker_ready: Optional[threading.Event] = None
+        # used to call async
+        self._loop = None
 
     def set_xavier_config(self, value: Optional[Dict]):
         self._xavier_config = value  # type: ignore
 
+    def set_worker_addresses(self, shard: int, worker_addresses: List[str]):
+        assert self._worker_addresses is not None
+        self._worker_addresses[shard] = worker_addresses
+        if (
+            self._all_worker_ready is not None
+            and len(self._worker_addresses) == self._n_worker
+        ):
+            self._all_worker_ready.set()
+
+    @property
+    def driver_info(self) -> Optional[dict]:
+        return self._driver_info
+
+    @property
+    def need_create_pools(self):
+        return True
+
+    def set_pool_addresses(self, pool_addresses: List[str]):
+        self._pool_addresses = pool_addresses  # type: ignore
+
+    def get_pool_addresses(self) -> Optional[List[str]]:
+        return self._pool_addresses
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        # loop will be passed into XinferenceDistributedExecutor,
+        # to call aynsc method with asyncio.run_coroutine_threadsafe
+        self._loop = loop  # type: ignore
+
     def load(self):
         try:
             import vllm
+            from vllm.config import VllmConfig
             from vllm.engine.arg_utils import AsyncEngineArgs
             from vllm.engine.async_llm_engine import AsyncLLMEngine
+            from vllm.executor.executor_base import ExecutorBase
             from vllm.lora.request import LoRARequest
         except ImportError:
             error_message = "Failed to import module 'vllm'"
@@ -263,18 +339,30 @@ class VLLMModel(LLM):
 
             raise ImportError(f"{error_message}\n\n{''.join(installation_guide)}")
 
-        if vllm.__version__ >= "0.3.1":
-            # from vllm v0.3.1, it uses cupy as NCCL backend
+        from ..llm_family import LlamaCppLLMSpecV1
+
+        if "0.3.1" <= vllm.__version__ <= "0.3.3":
+            # from vllm v0.3.1 to v0.3.3, it uses cupy as NCCL backend
             # in which cupy will fork a process
             # only for xoscar >= 0.3.0, new process is allowed in subpool
             # besides, xinference set start method as forkserver for unix
             # we need to set it to fork to make cupy NCCL work
             multiprocessing.set_start_method("fork", force=True)
 
+        self._device_count = self._get_cuda_count()
         self._model_config = self._sanitize_model_config(self._model_config)
         reasoning_content = self._model_config.pop("reasoning_content")
+        enable_thinking = self._model_config.pop("enable_thinking", False)
+        self.prepare_parse_reasoning_content(
+            reasoning_content, enable_thinking=enable_thinking
+        )
 
-        self.prepare_parse_reasoning_content(reasoning_content)
+        if (
+            isinstance(self.model_spec, LlamaCppLLMSpecV1)
+            and self.model_spec.model_format == "ggufv2"
+        ):
+            # gguf
+            self._preprocess_load_gguf()
 
         if self.lora_modules is None:
             self.lora_requests = []
@@ -316,6 +404,83 @@ class VLLMModel(LLM):
             self._engine = XavierEngine.from_engine_args(
                 engine_args, xavier_config=self._xavier_config
             )
+        elif self._n_worker > 1 or (
+            self._device_count > 1 and vllm.__version__ >= "0.7.0"
+        ):
+            from .distributed_executor import XinferenceDistributedExecutor
+
+            # model across multiple workers or GPUs
+            engine_args = AsyncEngineArgs(
+                model=self.model_path,
+                enable_lora=enable_lora,
+                max_loras=max_loras,
+                **self._model_config,
+            )
+
+            assert self._loop is not None
+            self._worker_addresses = {}
+
+            def _load():
+                try:
+                    assert self._pool_addresses
+
+                    if self._shard > 0:
+                        assert self._driver_info
+                        address = self._driver_info["address"]
+
+                        coro = xo.actor_ref(address, self.raw_model_uid)
+                        model_ref = asyncio.run_coroutine_threadsafe(
+                            coro, self._loop
+                        ).result()
+                        coro = model_ref.set_worker_addresses(
+                            self._shard, self._pool_addresses
+                        )
+                        asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+                    else:
+                        self.set_worker_addresses(0, self._pool_addresses)
+                        self._driver_info = {"address": self._address}
+
+                        if self._n_worker > 1:
+                            self._all_worker_ready = threading.Event()
+                            # if model across workers, wait for other workers ready
+                            self._all_worker_ready.wait()
+
+                        # gather all worker addresses
+                        worker_addresses = list(
+                            itertools.chain(
+                                *[
+                                    self._worker_addresses[shard]
+                                    for shard in range(self._n_worker)
+                                ]
+                            )
+                        )
+                        assert worker_addresses
+                        loop = self._loop
+
+                        class XinferenceAsyncLLMEngine(AsyncLLMEngine):
+                            @classmethod
+                            def _get_executor_cls(
+                                cls, engine_config: VllmConfig
+                            ) -> Type[ExecutorBase]:
+                                return partial(  # type: ignore
+                                    XinferenceDistributedExecutor,
+                                    pool_addresses=worker_addresses,
+                                    n_worker=self._n_worker,
+                                    loop=loop,
+                                )
+
+                        self._engine = XinferenceAsyncLLMEngine.from_engine_args(
+                            engine_args
+                        )
+                except:
+                    logger.exception("Creating vllm engine failed")
+                    self._loading_error = sys.exc_info()
+
+            self._loading_thread = threading.Thread(target=_load)
+            self._loading_thread.start()
+            # wait some time for init finish
+            if self._shard == 0:
+                self._loading_thread.join(1)
         else:
             engine_args = AsyncEngineArgs(
                 model=self.model_path,
@@ -328,7 +493,53 @@ class VLLMModel(LLM):
         self._check_health_task = None
         if hasattr(self._engine, "check_health"):
             # vLLM introduced `check_health` since v0.4.1
-            self._check_health_task = asyncio.create_task(self._check_healthy())
+            self._check_health_task = self._loop.create_task(self._check_healthy())
+
+    def wait_for_load(self):
+        if self._loading_thread:
+            self._loading_thread.join()
+            if self._loading_error:
+                _, err, tb = self._loading_error
+                raise err.with_traceback(tb)
+
+    def _preprocess_load_gguf(self):
+        # check if it is multi gguf files
+        if (
+            not os.path.isfile(self.model_path)
+            and self.model_spec.quantization_parts
+            and self.quantization in self.model_spec.quantization_parts
+        ):
+            raise RuntimeError(
+                "vllm does not support multiple gguf files, please merge them first and "
+                "provide `model_path` with merged file"
+            )
+
+        if "tokenizer" not in self._model_config:
+            # find pytorch format without quantization
+            non_quant_spec = next(
+                spec
+                for spec in self.model_family.model_specs
+                if spec.model_format == "pytorch"
+                and "none" in spec.quantizations
+                and spec.model_size_in_billions
+                == self.model_spec.model_size_in_billions
+            )
+
+            path = cache_model_tokenizer_and_config(self.model_family, non_quant_spec)
+            # other than gguf file, vllm requires to provide tokenizer and hf_config_path
+            self._model_config["tokenizer"] = self._model_config[
+                "hf_config_path"
+            ] = path
+
+        if not os.path.isfile(self.model_path):
+            self.model_path = os.path.realpath(
+                os.path.join(
+                    self.model_path,
+                    self.model_spec.model_file_name_template.format(
+                        quantization=self.quantization
+                    ),
+                )
+            )
 
     def stop(self):
         # though the vLLM engine will shutdown when deleted,
@@ -337,9 +548,10 @@ class VLLMModel(LLM):
         logger.info("Stopping vLLM engine")
         if self._check_health_task:
             self._check_health_task.cancel()
-        if model_executor := getattr(self._engine.engine, "model_executor", None):
-            model_executor.shutdown()
-        self._engine = None
+        if self._engine:
+            if model_executor := getattr(self._engine.engine, "model_executor", None):
+                model_executor.shutdown()
+            self._engine = None
 
     async def init_xavier(self):
         await self._engine.init_xavier()
@@ -370,22 +582,49 @@ class VLLMModel(LLM):
         if model_config is None:
             model_config = VLLMModelConfig()
 
-        cuda_count = self._get_cuda_count()
-
         model_config.setdefault("tokenizer_mode", "auto")
         model_config.setdefault("trust_remote_code", True)
-        model_config.setdefault("tensor_parallel_size", cuda_count)
+        model_config.setdefault("tensor_parallel_size", self._device_count)  # type: ignore
+        model_config.setdefault("pipeline_parallel_size", self._n_worker)  # type: ignore
         model_config.setdefault("block_size", 16)
         model_config.setdefault("swap_space", 4)
         model_config.setdefault("gpu_memory_utilization", 0.90)
         model_config.setdefault("max_num_seqs", 256)
-        model_config.setdefault("quantization", None)
+        if "model_quantization" in model_config:
+            model_config["quantization"] = model_config.pop("model_quantization")
+        else:
+            model_config.setdefault("quantization", None)
         model_config.setdefault("max_model_len", None)
         model_config.setdefault("guided_decoding_backend", "outlines")
         model_config.setdefault("reasoning_content", False)
         # Add scheduling policy if vLLM version is 0.6.3 or higher
         if vllm.__version__ >= "0.6.3":
             model_config.setdefault("scheduling_policy", "fcfs")
+            # init mm_processor_kwargs params
+            mm_processor_kwargs = model_config.get("mm_processor_kwargs", {})
+            if isinstance(mm_processor_kwargs, str):
+                try:
+                    mm_processor_kwargs = json.loads(mm_processor_kwargs)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Failed to parse mm_processor_kwargs as JSON, using default empty dict"
+                    )
+                    mm_processor_kwargs = {}
+                except Exception as e:
+                    logger.warning(
+                        f"Unexpected error parsing mm_processor_kwargs: {e}, using default empty dict"
+                    )
+                    mm_processor_kwargs = {}
+            pixel_params: Dict[str, int] = {}
+            if "min_pixels" in model_config:
+                pixel_params["min_pixels"] = model_config.pop("min_pixels")
+            if "max_pixels" in model_config:
+                pixel_params["max_pixels"] = model_config.pop("max_pixels")
+            if pixel_params or mm_processor_kwargs:
+                model_config["mm_processor_kwargs"] = {
+                    **mm_processor_kwargs,
+                    **pixel_params,
+                }
         return model_config
 
     @staticmethod
@@ -462,7 +701,11 @@ class VLLMModel(LLM):
         return sanitized
 
     @classmethod
-    def match(
+    def check_lib(cls) -> bool:
+        return importlib.util.find_spec("vllm") is not None
+
+    @classmethod
+    def match_json(
         cls, llm_family: "LLMFamilyV1", llm_spec: "LLMSpecV1", quantization: str
     ) -> bool:
         if not cls._has_cuda_device():
@@ -575,8 +818,6 @@ class VLLMModel(LLM):
             raise ImportError(f"{error_message}\n\n{''.join(installation_guide)}")
 
         sanitized_generate_config = self._sanitize_generate_config(generate_config)
-        if self.reasoning_parser:
-            sanitized_generate_config.pop("stop")
         logger.debug(
             "Enter generate, prompt: %s, generate config: %s", prompt, generate_config
         )
@@ -753,10 +994,10 @@ class VLLMModel(LLM):
 
 class VLLMChatModel(VLLMModel, ChatModelMixin):
     @classmethod
-    def match(
+    def match_json(
         cls, llm_family: "LLMFamilyV1", llm_spec: "LLMSpecV1", quantization: str
     ) -> bool:
-        if llm_spec.model_format not in ["pytorch", "gptq", "awq", "fp8"]:
+        if llm_spec.model_format not in ["pytorch", "gptq", "awq", "fp8", "ggufv2"]:
             return False
         if llm_spec.model_format == "pytorch":
             if quantization != "none" and not (quantization is None):
@@ -772,6 +1013,9 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
             else:
                 if "4" not in quantization:
                     return False
+        if llm_spec.model_format == "ggufv2":
+            if not (VLLM_INSTALLED and vllm.__version__ >= "0.8.2"):
+                return False
         if isinstance(llm_family, CustomLLMFamilyV1):
             if llm_family.model_family not in VLLM_SUPPORTED_CHAT_MODELS:
                 return False
@@ -788,13 +1032,19 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
     ) -> Dict:
         if not generate_config:
             generate_config = {}
-        if not generate_config.get("stop") and self.model_family.stop:
-            generate_config["stop"] = self.model_family.stop.copy()
-        if (
-            not generate_config.get("stop_token_ids")
-            and self.model_family.stop_token_ids
-        ):
-            generate_config["stop_token_ids"] = self.model_family.stop_token_ids.copy()
+        if "reasoning" in getattr(self.model_family, "model_ability", []):
+            generate_config.pop("stop", None)
+            generate_config.pop("stop_token_ids", None)
+        else:
+            if not generate_config.get("stop") and self.model_family.stop:
+                generate_config["stop"] = self.model_family.stop.copy()
+            if (
+                not generate_config.get("stop_token_ids")
+                and self.model_family.stop_token_ids
+            ):
+                generate_config[
+                    "stop_token_ids"
+                ] = self.model_family.stop_token_ids.copy()
         return generate_config
 
     @staticmethod
@@ -806,11 +1056,15 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
         chunks: AsyncGenerator[CompletionChunk, None],
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
         i = 0
+        previous_texts = [""]
+        if self.reasoning_parser:
+            chunks = self.reasoning_parser.prepare_reasoning_content(chunks)
         async for chunk in chunks:
             if i == 0:
-                yield self._get_first_chat_completion_chunk(
+                for first_chunk in self._get_first_chat_completion_chunk(
                     chunk, self.reasoning_parser
-                )
+                ):
+                    yield first_chunk
             # usage
             choices = chunk.get("choices")
             if not choices:
@@ -824,7 +1078,9 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
                         reasoning_parser=self.reasoning_parser,
                     )
                 else:
-                    yield self._to_chat_completion_chunk(chunk, self.reasoning_parser)
+                    yield self._to_chat_completion_chunk(
+                        chunk, self.reasoning_parser, previous_texts
+                    )
             i += 1
 
     @vllm_check
@@ -836,12 +1092,18 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
     ) -> Union[ChatCompletion, AsyncGenerator[ChatCompletionChunk, None]]:
         tools = generate_config.pop("tools", []) if generate_config else None
         model_family = self.model_family.model_family or self.model_family.model_name
-        full_context_kwargs = {}
+        full_context_kwargs = (
+            self._get_chat_template_kwargs_from_generate_config(
+                generate_config, self.reasoning_parser
+            )
+            or {}
+        )
         if tools:
-            if model_family in QWEN_TOOL_CALL_FAMILY:
+            if (
+                model_family in QWEN_TOOL_CALL_FAMILY
+                or model_family in DEEPSEEK_TOOL_CALL_FAMILY
+            ):
                 full_context_kwargs["tools"] = tools
-            elif model_family in DEEPSEEK_TOOL_CALL_FAMILY:
-                self._tools_to_messages_for_deepseek(messages, tools)
         assert self.model_family.chat_template is not None
         full_prompt = self.get_full_context(
             messages, self.model_family.chat_template, **full_context_kwargs
@@ -872,7 +1134,7 @@ class VLLMChatModel(VLLMModel, ChatModelMixin):
 
 class VLLMVisionModel(VLLMModel, ChatModelMixin):
     @classmethod
-    def match(
+    def match_json(
         cls, llm_family: "LLMFamilyV1", llm_spec: "LLMSpecV1", quantization: str
     ) -> bool:
         if not cls._has_cuda_device():
@@ -953,7 +1215,12 @@ class VLLMVisionModel(VLLMModel, ChatModelMixin):
         if "internvl2" not in model_family.lower():
             from qwen_vl_utils import process_vision_info
 
-            full_context_kwargs = {}
+            full_context_kwargs = (
+                self._get_chat_template_kwargs_from_generate_config(
+                    generate_config, self.reasoning_parser
+                )
+                or {}
+            )
             if tools and model_family in QWEN_TOOL_CALL_FAMILY:
                 full_context_kwargs["tools"] = tools
             assert self.model_family.chat_template is not None

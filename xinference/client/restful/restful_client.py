@@ -28,7 +28,6 @@ if TYPE_CHECKING:
         CompletionChunk,
         Embedding,
         ImageList,
-        LlamaCppGenerateConfig,
         PytorchGenerateConfig,
         VideoList,
     )
@@ -464,14 +463,59 @@ class RESTfulVideoModelHandle(RESTfulModelHandle):
         response_data = response.json()
         return response_data
 
+    def image_to_video(
+        self,
+        image: Union[str, bytes],
+        prompt: str,
+        negative_prompt: Optional[str] = None,
+        n: int = 1,
+        **kwargs,
+    ) -> "VideoList":
+        """
+        Creates a video by the input image and text.
+
+        Parameters
+        ----------
+        image: `Union[str, bytes]`
+            The input image to condition the generation on.
+        prompt: `str` or `List[str]`
+            The prompt or prompts to guide video generation. If not defined, you need to pass `prompt_embeds`.
+        negative_prompt (`str` or `List[str]`, *optional*):
+            The prompt or prompts not to guide the image generation.
+        n: `int`, defaults to 1
+            The number of videos to generate per prompt. Must be between 1 and 10.
+        Returns
+        -------
+        VideoList
+            A list of video objects.
+        """
+        url = f"{self._base_url}/v1/video/generations/image"
+        params = {
+            "model": self._model_uid,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "n": n,
+            "kwargs": json.dumps(kwargs),
+        }
+        files: List[Any] = []
+        for key, value in params.items():
+            files.append((key, (None, value)))
+        files.append(("image", ("image", image, "application/octet-stream")))
+        response = requests.post(url, files=files, headers=self.auth_headers)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to create the video from image, detail: {_get_error_string(response)}"
+            )
+
+        response_data = response.json()
+        return response_data
+
 
 class RESTfulGenerateModelHandle(RESTfulModelHandle):
     def generate(
         self,
         prompt: str,
-        generate_config: Optional[
-            Union["LlamaCppGenerateConfig", "PytorchGenerateConfig"]
-        ] = None,
+        generate_config: Optional["PytorchGenerateConfig"] = None,
     ) -> Union["Completion", Iterator["CompletionChunk"]]:
         """
         Creates a completion for the provided prompt and parameters via RESTful APIs.
@@ -480,9 +524,8 @@ class RESTfulGenerateModelHandle(RESTfulModelHandle):
         ----------
         prompt: str
             The user's message or user's input.
-        generate_config: Optional[Union["LlamaCppGenerateConfig", "PytorchGenerateConfig"]]
+        generate_config: Optional["PytorchGenerateConfig"]
             Additional configuration for the chat generation.
-            "LlamaCppGenerateConfig" -> Configuration for llama-cpp-python model
             "PytorchGenerateConfig" -> Configuration for pytorch model
 
         Returns
@@ -528,9 +571,7 @@ class RESTfulChatModelHandle(RESTfulGenerateModelHandle):
         self,
         messages: List[Dict],
         tools: Optional[List[Dict]] = None,
-        generate_config: Optional[
-            Union["LlamaCppGenerateConfig", "PytorchGenerateConfig"]
-        ] = None,
+        generate_config: Optional["PytorchGenerateConfig"] = None,
     ) -> Union["ChatCompletion", Iterator["ChatCompletionChunk"]]:
         """
         Given a list of messages comprising a conversation, the model will return a response via RESTful APIs.
@@ -541,9 +582,8 @@ class RESTfulChatModelHandle(RESTfulGenerateModelHandle):
             A list of messages comprising the conversation so far.
         tools: Optional[List[Dict]]
             A tool list.
-        generate_config: Optional[Union["LlamaCppGenerateConfig", "PytorchGenerateConfig"]]
+        generate_config: Optional["PytorchGenerateConfig"]
             Additional configuration for the chat generation.
-            "LlamaCppGenerateConfig" -> configuration for llama-cpp-python model
             "PytorchGenerateConfig" -> configuration for pytorch model
 
         Returns
@@ -723,6 +763,7 @@ class RESTfulAudioModelHandle(RESTfulModelHandle):
         speed: float = 1.0,
         stream: bool = False,
         prompt_speech: Optional[bytes] = None,
+        prompt_latent: Optional[bytes] = None,
         **kwargs,
     ):
         """
@@ -743,6 +784,8 @@ class RESTfulAudioModelHandle(RESTfulModelHandle):
             Use stream or not.
         prompt_speech: bytes
             The audio bytes to be provided to the model.
+        prompt_latent: bytes
+            The latent bytes to be provided to the model.
 
         Returns
         -------
@@ -759,14 +802,22 @@ class RESTfulAudioModelHandle(RESTfulModelHandle):
             "stream": stream,
             "kwargs": json.dumps(kwargs),
         }
+        files: List[Any] = []
         if prompt_speech:
-            files: List[Any] = []
             files.append(
                 (
                     "prompt_speech",
                     ("prompt_speech", prompt_speech, "application/octet-stream"),
                 )
             )
+        if prompt_latent:
+            files.append(
+                (
+                    "prompt_latent",
+                    ("prompt_latent", prompt_latent, "application/octet-stream"),
+                )
+            )
+        if files:
             response = requests.post(
                 url, data=params, files=files, headers=self.auth_headers, stream=stream
             )
@@ -966,7 +1017,7 @@ class Client:
         model_path: Optional[str]
             Model path, if gguf format, should be the file path, otherwise, should be directory of the model.
         **kwargs:
-            Any other parameters been specified.
+            Any other parameters been specified. e.g. multimodal_projector for multimodal inference with the llama.cpp backend.
 
         Returns
         -------
@@ -999,10 +1050,17 @@ class Client:
             "model_path": model_path,
         }
 
+        wait_ready = kwargs.pop("wait_ready", True)
+
         for key, value in kwargs.items():
             payload[str(key)] = value
 
-        response = requests.post(url, json=payload, headers=self._headers)
+        if wait_ready:
+            response = requests.post(url, json=payload, headers=self._headers)
+        else:
+            response = requests.post(
+                url, json=payload, headers=self._headers, params={"wait_ready": False}
+            )
         if response.status_code != 200:
             raise RuntimeError(
                 f"Failed to launch model, detail: {_get_error_string(response)}"
@@ -1034,6 +1092,68 @@ class Client:
             raise RuntimeError(
                 f"Failed to terminate model, detail: {_get_error_string(response)}"
             )
+
+    def get_launch_model_progress(self, model_uid: str) -> dict:
+        """
+        Get progress of the specific model.
+
+        Parameters
+        ----------
+        model_uid: str
+            The unique id that identify the model we want.
+
+        Returns
+        -------
+        result: dict
+            Result that contains progress.
+
+        Raises
+        ------
+        RuntimeError
+            Report failure to get the wanted model with given model_uid. Provide details of failure through error message.
+        """
+        url = f"{self.base_url}/v1/models/{model_uid}/progress"
+
+        response = requests.get(url, headers=self._headers)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Fail to get model launching progress, detail: {_get_error_string(response)}"
+            )
+        return response.json()
+
+    def cancel_launch_model(self, model_uid: str):
+        """
+        Cancel launching model.
+
+        Parameters
+        ----------
+        model_uid: str
+            The unique id that identify the model we want.
+
+        Raises
+        ------
+        RuntimeError
+            Report failure to get the wanted model with given model_uid. Provide details of failure through error message.
+        """
+        url = f"{self.base_url}/v1/models/{model_uid}/cancel"
+
+        response = requests.post(url, headers=self._headers)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Fail to cancel launching model, detail: {_get_error_string(response)}"
+            )
+
+    def get_instance_info(self, model_name: str, model_uid: str):
+        url = f"{self.base_url}/v1/models/instances"
+        response = requests.get(
+            url,
+            headers=self._headers,
+            params={"model_name": model_name, "model_uid": model_uid},
+        )
+        if response.status_code != 200:
+            raise RuntimeError("Failed to get instance info")
+        response_data = response.json()
+        return response_data
 
     def _get_supervisor_internal_address(self):
         url = f"{self.base_url}/v1/address"

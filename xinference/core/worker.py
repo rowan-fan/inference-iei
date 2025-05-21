@@ -22,9 +22,20 @@ import signal
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from logging import getLogger
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union, no_type_check
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+    no_type_check,
+)
 
 import xoscar as xo
 from async_timeout import timeout
@@ -34,19 +45,31 @@ from ..constants import (
     XINFERENCE_CACHE_DIR,
     XINFERENCE_DISABLE_HEALTH_CHECK,
     XINFERENCE_DISABLE_METRICS,
+    XINFERENCE_ENABLE_VIRTUAL_ENV,
     XINFERENCE_HEALTH_CHECK_INTERVAL,
+    XINFERENCE_VIRTUAL_ENV_DIR,
 )
 from ..core.model import ModelActor
 from ..core.status_guard import LaunchStatus
 from ..device_utils import get_available_device_env_name, gpu_count
-from ..model.core import ModelDescription, create_model_instance
+from ..model.core import ModelDescription, VirtualEnvSettings, create_model_instance
+from ..model.utils import CancellableDownloader
 from ..types import PeftModelConfig
+from ..utils import get_pip_config_args, get_real_path
 from .cache_tracker import CacheTrackerActor
 from .event import Event, EventCollectorActor, EventType
 from .metrics import launch_metrics_export_server, record_metrics
 from .resource import gather_node_info
 from .status_guard import StatusGuardActor
 from .utils import log_async, log_sync, parse_replica_model_uid, purge_dir
+
+try:
+    from xoscar.virtualenv import VirtualEnvManager
+except ImportError:
+    VirtualEnvManager = None
+
+if TYPE_CHECKING:
+    from .progress_tracker import Progressor
 
 logger = getLogger(__name__)
 
@@ -62,6 +85,17 @@ else:
 @dataclass
 class ModelStatus:
     last_error: str = ""
+
+
+@dataclass
+class LaunchInfo:
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    # virtualenv manager
+    virtual_env_manager: Optional["VirtualEnvManager"] = None
+    # downloader, report progress or cancel entire download
+    downloader: Optional[CancellableDownloader] = None
+    # sub pools created for the model
+    sub_pools: Optional[List[str]] = None
 
 
 class WorkerActor(xo.StatelessActor):
@@ -92,7 +126,7 @@ class WorkerActor(xo.StatelessActor):
 
         # internal states.
         # temporary placeholder during model launch process:
-        self._model_uid_launching_guard: Dict[str, bool] = {}
+        self._model_uid_launching_guard: Dict[str, LaunchInfo] = {}
         # attributes maintained after model launched:
         self._model_uid_to_model: Dict[str, xo.ActorRefType["ModelActor"]] = {}
         self._model_uid_to_model_spec: Dict[str, ModelDescription] = {}
@@ -114,7 +148,7 @@ class WorkerActor(xo.StatelessActor):
         elif metrics_exporter_host is not None or metrics_exporter_port is not None:
             # metrics export server.
             logger.info(
-                f"Starting metrics export server at {metrics_exporter_host}:{metrics_exporter_port}"
+                f"Starting metrics export server at {metrics_exporter_host}:{metrics_exporter_port}"  # noqa: E231
             )
             q: queue.Queue = queue.Queue()
             self._metrics_thread = threading.Thread(
@@ -128,7 +162,9 @@ class WorkerActor(xo.StatelessActor):
             while self._metrics_thread.is_alive():
                 try:
                     host, port = q.get(block=False)[:2]
-                    logger.info(f"Metrics server is started at: http://{host}:{port}")
+                    logger.info(
+                        f"Metrics server is started at: http://{host}:{port}"  # noqa: E231
+                    )
                     break
                 except queue.Empty:
                     pass
@@ -352,6 +388,7 @@ class WorkerActor(xo.StatelessActor):
         self._cache_tracker_ref = await xo.actor_ref(
             address=self._supervisor_address, uid=CacheTrackerActor.default_uid()
         )
+        self._progress_tracker_ref = None
         # cache_tracker is on supervisor
         from ..model.audio import get_audio_model_descriptions
         from ..model.embedding import get_embedding_model_descriptions
@@ -548,8 +585,10 @@ class WorkerActor(xo.StatelessActor):
         model_type: Optional[str] = None,
         n_gpu: Optional[Union[int, str]] = "auto",
         gpu_idx: Optional[List[int]] = None,
+        env: Optional[Dict[str, str]] = None,
+        start_python: Optional[str] = None,
     ) -> Tuple[str, List[str]]:
-        env = {}
+        env = {} if env is None else env
         devices = []
         env_name = get_available_device_env_name() or "CUDA_VISIBLE_DEVICES"
         if gpu_idx is None:
@@ -573,14 +612,8 @@ class WorkerActor(xo.StatelessActor):
             )
             env[env_name] = ",".join([str(dev) for dev in devices])
 
-        if os.name != "nt" and platform.system() != "Darwin":
-            # Linux
-            start_method = "forkserver"
-        else:
-            # Windows and macOS
-            start_method = "spawn"
         subpool_address = await self._main_pool.append_sub_pool(
-            env=env, start_method=start_method
+            env=env, start_python=start_python
         )
         return subpool_address, [str(dev) for dev in devices]
 
@@ -751,9 +784,9 @@ class WorkerActor(xo.StatelessActor):
         elif model_type == "image":
             return model.model_ability
         elif model_type == "audio":
-            return [model.model_ability]
+            return model.model_ability
         elif model_type == "video":
-            return ["text_to_video"]
+            return model.model_ability
         elif model_type == "flexible":
             return ["flexible"]
         else:
@@ -777,6 +810,95 @@ class WorkerActor(xo.StatelessActor):
                 version_info["model_version"],
                 version_info["model_file_location"],
             )
+
+    @classmethod
+    def _create_virtual_env_manager(
+        cls,
+        enable_virtual_env: Optional[bool],
+        virtual_env_name: Optional[str],
+        env_path: str,
+    ) -> Optional[VirtualEnvManager]:
+        if enable_virtual_env is None:
+            enable_virtual_env = XINFERENCE_ENABLE_VIRTUAL_ENV
+
+        if not enable_virtual_env:
+            # skip preparing virtualenv
+            return None
+
+        from xoscar.virtualenv import get_virtual_env_manager
+
+        virtual_env_manager: VirtualEnvManager = get_virtual_env_manager(
+            virtual_env_name or "uv", env_path
+        )
+        # create env
+        virtual_env_manager.create_env()
+        return virtual_env_manager
+
+    @classmethod
+    def _prepare_virtual_env(
+        cls,
+        virtual_env_manager: "VirtualEnvManager",
+        settings: Optional[VirtualEnvSettings],
+    ):
+        if not settings or not settings.packages:
+            # no settings or no packages
+            return
+
+        if settings.inherit_pip_config:
+            # inherit pip config
+            pip_config = get_pip_config_args()
+            for k, v in pip_config.items():
+                if hasattr(settings, k) and not getattr(settings, k):
+                    setattr(settings, k, v)
+
+        packages = settings.packages
+        index_url = settings.index_url
+        extra_index_url = settings.extra_index_url
+        find_links = settings.find_links
+        trusted_host = settings.trusted_host
+
+        logger.info(
+            "Installing packages %s in virtual env %s, with settings(index_url=%s)",
+            packages,
+            virtual_env_manager.env_path,
+            index_url,
+        )
+        virtual_env_manager.install_packages(
+            packages,
+            index_url=index_url,
+            extra_index_url=extra_index_url,
+            find_links=find_links,
+            trusted_host=trusted_host,
+        )
+
+    async def _get_progressor(self, request_id: str):
+        from .progress_tracker import Progressor, ProgressTrackerActor
+
+        progress_tracker_ref = self._progress_tracker_ref
+        if progress_tracker_ref is None:
+            progress_tracker_ref = self._progress_tracker_ref = await xo.actor_ref(
+                address=self._supervisor_address, uid=ProgressTrackerActor.default_uid()
+            )
+
+        progressor = Progressor(
+            request_id,
+            progress_tracker_ref,
+            asyncio.get_running_loop(),
+        )
+        await progressor.start()
+        progressor.set_progress(0.0, "start to launch model")
+        return progressor
+
+    @classmethod
+    def _upload_download_progress(
+        cls, progressor: "Progressor", downloader: CancellableDownloader
+    ):
+        while not downloader.done:
+            progress = downloader.get_progress()
+            progressor.set_progress(progress)
+            downloader.wait(1)
+
+        progressor.set_progress(1.0, "Start to load model")
 
     @log_async(logger=logger, level=logging.INFO)
     async def launch_builtin_model(
@@ -870,11 +992,33 @@ class WorkerActor(xo.StatelessActor):
             raise ValueError(f"{model_uid} is running")
 
         try:
-            self._model_uid_launching_guard[model_uid] = True
-            subpool_address, devices = await self._create_subpool(
-                model_uid, model_type, n_gpu=n_gpu, gpu_idx=gpu_idx
-            )
+            self._model_uid_launching_guard[model_uid] = launch_info = LaunchInfo()
 
+            # virtualenv
+            enable_virtual_env = kwargs.pop("enable_virtual_env", None)
+            virtual_env_name = kwargs.pop("virtual_env_name", None)
+            virtual_env_path = os.path.join(
+                XINFERENCE_VIRTUAL_ENV_DIR, "v2", model_name
+            )
+            virtual_env_manager = await asyncio.to_thread(
+                self._create_virtual_env_manager,
+                enable_virtual_env,
+                virtual_env_name,
+                virtual_env_path,
+            )
+            subpool_python_path = (
+                None
+                if virtual_env_manager is None
+                else virtual_env_manager.get_python_path()
+            )
+            subpool_address, devices = await self._create_subpool(
+                model_uid,
+                model_type,
+                n_gpu=n_gpu,
+                gpu_idx=gpu_idx,
+                start_python=subpool_python_path,
+            )
+            all_subpool_addresses = [subpool_address]
             try:
                 xavier_config: Optional[Dict] = kwargs.pop("xavier_config", None)
                 if xavier_config is not None:
@@ -885,29 +1029,68 @@ class WorkerActor(xo.StatelessActor):
                     # add a few kwargs
                     model_kwargs.update(
                         dict(
-                            address=self.address,
+                            address=subpool_address,
                             n_worker=n_worker,
                             shard=shard,
                             driver_info=driver_info,
                         )
                     )
-                model, model_description = await asyncio.to_thread(
-                    create_model_instance,
-                    subpool_address,
-                    devices,
-                    model_uid,
-                    model_type,
-                    model_name,
-                    model_engine,
-                    model_format,
-                    model_size_in_billions,
-                    quantization,
-                    peft_model_config,
-                    download_hub,
-                    model_path,
-                    **model_kwargs,
-                )
-                await self.update_cache_status(model_name, model_description)
+
+                with CancellableDownloader(
+                    cancelled_event=launch_info.cancel_event
+                ) as downloader:
+                    launch_info.downloader = downloader
+                    progressor = await self._get_progressor("launching-" + model_uid)
+                    # split into download and launch
+                    progressor.split_stages(2, stage_weight=[0, 0.8, 1.0])
+                    with progressor:
+                        upload_progress_task = asyncio.create_task(
+                            asyncio.to_thread(
+                                self._upload_download_progress, progressor, downloader
+                            )
+                        )
+                        model, model_description = await asyncio.to_thread(
+                            create_model_instance,
+                            subpool_address,
+                            devices,
+                            model_uid,
+                            model_type,
+                            model_name,
+                            model_engine,
+                            model_format,
+                            model_size_in_billions,
+                            quantization,
+                            peft_model_config,
+                            download_hub,
+                            model_path,
+                            **model_kwargs,
+                        )
+                    await self.update_cache_status(model_name, model_description)
+
+                def check_cancel():
+                    # check downloader first, sometimes download finished
+                    # cancelled already
+                    if downloader.cancelled:
+                        with progressor:
+                            # just report progress
+                            pass
+                        downloader.raise_error(error_msg="Launch cancelled")
+
+                # check cancel before prepare virtual env
+                check_cancel()
+
+                # install packages in virtual env
+                if virtual_env_manager:
+                    await asyncio.to_thread(
+                        self._prepare_virtual_env,
+                        virtual_env_manager,
+                        model_description.spec.virtualenv,
+                    )
+                    launch_info.virtual_env_manager = virtual_env_manager
+
+                # check before creating model actor
+                check_cancel()
+
                 model_ref = await xo.create_actor(
                     ModelActor,
                     address=subpool_address,
@@ -923,11 +1106,44 @@ class WorkerActor(xo.StatelessActor):
                     shard=shard,
                     driver_info=driver_info,
                 )
-                await model_ref.load()
+                if await model_ref.need_create_pools() and (
+                    len(devices) > 1 or n_worker > 1  # type: ignore
+                ):
+                    coros = []
+                    env_name = get_available_device_env_name() or "CUDA_VISIBLE_DEVICES"
+                    env_value = ",".join(devices)
+                    for device in devices:
+                        coros.append(
+                            self._main_pool.append_sub_pool(
+                                env={env_name: env_value},
+                                start_python=subpool_python_path,
+                            )
+                        )
+                    pool_addresses = await asyncio.gather(*coros)
+                    all_subpool_addresses.extend(pool_addresses)
+                    await model_ref.set_pool_addresses(pool_addresses)
+
+                # check before loading
+                check_cancel()
+
+                # set all subpool addresses
+                # when cancelled, all subpool addresses need to be destroyed
+                launch_info.sub_pools = all_subpool_addresses
+
+                with progressor:
+                    try:
+                        await model_ref.load()
+                    except xo.ServerClosed:
+                        check_cancel()
+                        raise
             except:
                 logger.error(f"Failed to load model {model_uid}", exc_info=True)
                 self.release_devices(model_uid=model_uid)
-                await self._main_pool.remove_sub_pool(subpool_address)
+                for addr in all_subpool_addresses:
+                    try:
+                        await self._main_pool.remove_sub_pool(addr)
+                    except KeyError:
+                        continue
                 raise
             self._model_uid_to_model[model_uid] = model_ref
             self._model_uid_to_model_spec[model_uid] = model_description
@@ -960,6 +1176,39 @@ class WorkerActor(xo.StatelessActor):
     async def wait_for_load(self, model_uid: str):
         model_ref = self._model_uid_to_model[model_uid]
         await model_ref.wait_for_load()
+
+    @log_sync(logger=logger, level=logging.INFO)
+    async def cancel_launch_model(self, model_uid: str):
+        try:
+            launch_info = self._model_uid_launching_guard[model_uid]
+
+            # downloader shared same cancel event
+            # sometimes cancel happens very early before downloader
+            # even if users cancel at this time,
+            # downloader will know and stop everything
+            launch_info.cancel_event.set()
+
+            if launch_info.downloader:
+                logger.debug("Try to cancel download, %s")
+                launch_info.downloader.cancel()
+            if launch_info.virtual_env_manager:
+                launch_info.virtual_env_manager.cancel_install()
+            if launch_info.sub_pools:
+                logger.debug("Try to stop sub pools: %s", launch_info.sub_pools)
+                coros = []
+                for addr in launch_info.sub_pools:
+                    coros.append(self._main_pool.remove_sub_pool(addr, force=True))
+                await asyncio.gather(*coros)
+            if self._status_guard_ref is not None:
+                await self._status_guard_ref.update_instance_info(
+                    parse_replica_model_uid(model_uid)[0],
+                    {"status": LaunchStatus.ERROR.name},
+                )
+        except KeyError:
+            logger.error("Fail to cancel launching", exc_info=True)
+            raise RuntimeError(
+                "Model is not launching, may have launched or not launched yet"
+            )
 
     @log_async(logger=logger, level=logging.INFO)
     async def terminate_model(self, model_uid: str, is_model_die=False):
@@ -994,15 +1243,43 @@ class WorkerActor(xo.StatelessActor):
         if model_ref is None:
             logger.debug("Model not found, uid: %s", model_uid)
 
+        pool_addresses = None
+        if model_ref is not None:
+            try:
+                # pool addresses if model.need_create_pools()
+                pool_addresses = await model_ref.get_pool_addresses()
+            except Exception as e:
+                # process may disappear, we just ignore it.
+                logger.debug("Fail to get pool addresses, error: %s", e)
+
         try:
-            await xo.destroy_actor(model_ref)
+            logger.debug("Start to destroy model actor: %s", model_ref)
+            coro = xo.destroy_actor(model_ref)
+            # see https://github.com/xorbitsai/xoscar/pull/140
+            # asyncio.wait_for cannot work for Xoscar actor call,
+            # because when time out, the coroutine will be cancelled via raise CancelledEror,
+            # inside actor call, the error will be caught and
+            # a CancelMessage will be sent to dest actor pool,
+            # however the actor pool may be stuck already,
+            # thus the timeout will never be raised
+            await xo.wait_for(coro, timeout=5)
         except Exception as e:
             logger.debug(
                 "Destroy model actor failed, model uid: %s, error: %s", model_uid, e
             )
         try:
+            to_remove_addresses = []
             subpool_address = self._model_uid_to_addr[model_uid]
-            await self._main_pool.remove_sub_pool(subpool_address, force=True)
+            to_remove_addresses.append(subpool_address)
+            if pool_addresses:
+                to_remove_addresses.extend(pool_addresses)
+            logger.debug("Remove sub pools: %s", to_remove_addresses)
+            coros = []
+            for to_remove_addr in to_remove_addresses:
+                coros.append(
+                    self._main_pool.remove_sub_pool(to_remove_addr, force=True)
+                )
+            await asyncio.gather(*coros)
         except Exception as e:
             logger.debug(
                 "Remove sub pool failed, model uid: %s, error: %s", model_uid, e
@@ -1119,16 +1396,9 @@ class WorkerActor(xo.StatelessActor):
             }
             path = list.get("model_file_location")
             cached_model["path"] = path
-            # parsing soft links
-            if os.path.isdir(path):
-                files = os.listdir(path)
-                # dir has files
-                if files:
-                    resolved_file = os.path.realpath(os.path.join(path, files[0]))
-                    if resolved_file:
-                        cached_model["real_path"] = os.path.dirname(resolved_file)
-            else:
-                cached_model["real_path"] = os.path.realpath(path)
+            real_path = get_real_path(path)
+            if real_path:
+                cached_model["real_path"] = real_path
             cached_model["actor_ip_address"] = self.address
             cached_models.append(cached_model)
         return cached_models
@@ -1171,7 +1441,7 @@ class WorkerActor(xo.StatelessActor):
                 else:
                     logger.debug(f"{path} is not a valid path.")
             except Exception as e:
-                logger.error(f"Fail to delete {path} with error:{e}.")
+                logger.error(f"Fail to delete {path} with error:{e}.")  # noqa: E231
                 return False
         await self._cache_tracker_ref.confirm_and_remove_model(
             model_version, self.address
@@ -1210,21 +1480,13 @@ class WorkerActor(xo.StatelessActor):
     ) -> Tuple[str, int]:
         from ..model.llm.vllm.xavier.collective_manager import Rank0ModelActor
 
-        if os.name != "nt" and platform.system() != "Darwin":
-            # Linux
-            start_method = "forkserver"
-        else:
-            # Windows and macOS
-            start_method = "spawn"
-        subpool_address = await self._main_pool.append_sub_pool(
-            start_method=start_method
-        )
+        subpool_address = await self._main_pool.append_sub_pool()
 
         store_address = subpool_address.split(":")[0]
         # Note that `store_port` needs to be generated on the worker,
         # as the TCP store is on rank 0, not on the supervisor.
         store_port = xo.utils.get_next_port()
-        self._model_uid_launching_guard[rep_model_uid] = True
+        self._model_uid_launching_guard[rep_model_uid] = LaunchInfo()
         try:
             try:
                 xavier_config["rank_address"] = subpool_address

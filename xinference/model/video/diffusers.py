@@ -14,12 +14,13 @@
 
 import base64
 import logging
+import operator
 import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-from typing import TYPE_CHECKING, List, Union
+from functools import partial, reduce
+from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 import numpy as np
 import PIL.Image
@@ -29,6 +30,7 @@ from ...device_utils import gpu_count, move_model_to_available_device
 from ...types import Video, VideoList
 
 if TYPE_CHECKING:
+    from ....core.progress_tracker import Progressor
     from .core import VideoModelFamilyV1
 
 
@@ -53,7 +55,7 @@ def export_to_video_imageio(
     return output_video_path
 
 
-class DiffUsersVideoModel:
+class DiffusersVideoModel:
     def __init__(
         self,
         model_uid: str,
@@ -64,12 +66,17 @@ class DiffUsersVideoModel:
         self._model_uid = model_uid
         self._model_path = model_path
         self._model_spec = model_spec
+        self._abilities = model_spec.model_ability or []  # type: ignore
         self._model = None
         self._kwargs = kwargs
 
     @property
     def model_spec(self):
         return self._model_spec
+
+    @property
+    def model_ability(self):
+        return self._abilities
 
     def load(self):
         import torch
@@ -105,6 +112,28 @@ class DiffUsersVideoModel:
             pipeline = self._model = HunyuanVideoPipeline.from_pretrained(
                 self._model_path, transformer=transformer, **kwargs
             )
+        elif self.model_spec.model_family == "Wan":
+            from diffusers import AutoencoderKLWan, WanImageToVideoPipeline, WanPipeline
+            from transformers import CLIPVisionModel
+
+            if "text2video" in self.model_spec.model_ability:
+                pipeline = self._model = WanPipeline.from_pretrained(
+                    self._model_path, **kwargs
+                )
+            else:
+                assert "image2video" in self.model_spec.model_ability
+
+                image_encoder = CLIPVisionModel.from_pretrained(
+                    self._model_path,
+                    subfolder="image_encoder",
+                    torch_dtype=torch.float32,
+                )
+                vae = AutoencoderKLWan.from_pretrained(
+                    self._model_path, subfolder="vae", torch_dtype=torch.float32
+                )
+                pipeline = self._model = WanImageToVideoPipeline.from_pretrained(
+                    self._model_path, vae=vae, image_encoder=image_encoder, **kwargs
+                )
         else:
             raise Exception(
                 f"Unsupported model family: {self._model_spec.model_family}"
@@ -119,13 +148,53 @@ class DiffUsersVideoModel:
             pipeline.transformer = torch.compile(
                 pipeline.transformer, mode="max-autotune", fullgraph=True
             )
+        if kwargs.get("layerwise_cast", False):
+            compute_dtype = pipeline.transformer.dtype
+            pipeline.transformer.enable_layerwise_casting(
+                storage_dtype=torch.float8_e4m3fn, compute_dtype=compute_dtype
+            )
         if kwargs.get("cpu_offload", False):
             logger.debug("CPU offloading model")
             pipeline.enable_model_cpu_offload()
             if kwargs.get("sequential_cpu_offload", True):
                 pipeline.enable_sequential_cpu_offload()
-            pipeline.vae.enable_slicing()
-            pipeline.vae.enable_tiling()
+            try:
+                pipeline.vae.enable_slicing()
+            except AttributeError:
+                # model does not support slicing
+                pass
+            try:
+                pipeline.vae.enable_tiling()
+            except AttributeError:
+                # model does support tiling
+                pass
+        elif kwargs.get("group_offload", False):
+            from diffusers.hooks.group_offloading import apply_group_offloading
+
+            onload_device = torch.device("cuda")
+            offload_device = torch.device("cpu")
+
+            apply_group_offloading(
+                pipeline.text_encoder,
+                onload_device=onload_device,
+                offload_device=offload_device,
+                offload_type="block_level",
+                num_blocks_per_group=4,
+            )
+            group_offload_kwargs = {}
+            if kwargs.get("use_stream", False):
+                group_offload_kwargs["offload_type"] = "block_level"
+                group_offload_kwargs["num_blocks_per_group"] = 4
+            else:
+                group_offload_kwargs["offload_type"] = "leaf_level"
+                group_offload_kwargs["use_stream"] = True
+            pipeline.transformer.enable_group_offload(
+                onload_device=onload_device,
+                offload_device=offload_device,
+                **group_offload_kwargs,
+            )
+            # Since we've offloaded the larger models already, we can move the rest of the model components to GPU
+            pipeline = move_model_to_available_device(pipeline)
         elif not kwargs.get("device_map"):
             logger.debug("Loading model to available device")
             if gpu_count() > 1:
@@ -135,6 +204,26 @@ class DiffUsersVideoModel:
         # Recommended if your computer has < 64 GB of RAM
         pipeline.enable_attention_slicing()
 
+    @staticmethod
+    def _process_progressor(kwargs: dict):
+        import diffusers
+
+        progressor: Progressor = kwargs.pop("progressor", None)
+
+        def report_status_callback(
+            pipe: diffusers.DiffusionPipeline,
+            step: int,
+            timestep: int,
+            callback_kwargs: dict,
+        ):
+            num_steps = pipe.num_timesteps
+            progressor.set_progress((step + 1) / num_steps)
+
+            return callback_kwargs
+
+        if progressor and progressor.request_id:
+            kwargs["callback_on_step_end"] = report_status_callback
+
     def text_to_video(
         self,
         prompt: str,
@@ -143,27 +232,77 @@ class DiffUsersVideoModel:
         response_format: str = "b64_json",
         **kwargs,
     ) -> VideoList:
-        import gc
-
-        # cv2 bug will cause the video cannot be normally displayed
-        # thus we use the imageio one
-        # from diffusers.utils import export_to_video
-        from ...device_utils import empty_cache
-
         assert self._model is not None
         assert callable(self._model)
         generate_kwargs = self._model_spec.default_generate_config.copy()
         generate_kwargs.update(kwargs)
         generate_kwargs["num_videos_per_prompt"] = n
+        fps = generate_kwargs.pop("fps", 10)
         logger.debug(
             "diffusers text_to_video args: %s",
             generate_kwargs,
         )
+        self._process_progressor(generate_kwargs)
         output = self._model(
             prompt=prompt,
             num_inference_steps=num_inference_steps,
             **generate_kwargs,
         )
+        return self._output_to_video(output, fps, response_format)
+
+    def image_to_video(
+        self,
+        image: PIL.Image,
+        prompt: str,
+        n: int = 1,
+        num_inference_steps: Optional[int] = None,
+        response_format: str = "b64_json",
+        **kwargs,
+    ):
+        assert self._model is not None
+        assert callable(self._model)
+        generate_kwargs = self._model_spec.default_generate_config.copy()
+        generate_kwargs.update(kwargs)
+        generate_kwargs["num_videos_per_prompt"] = n
+        if num_inference_steps:
+            generate_kwargs["num_inference_steps"] = num_inference_steps
+        fps = generate_kwargs.pop("fps", 10)
+
+        # process image
+        max_area = generate_kwargs.pop("max_area")
+        if isinstance(max_area, str):
+            max_area = [int(v) for v in max_area.split("*")]
+        max_area = reduce(operator.mul, max_area, 1)
+        image = self._process_image(image, max_area)
+
+        height, width = image.height, image.width
+        generate_kwargs.pop("width", None)
+        generate_kwargs.pop("height", None)
+        self._process_progressor(generate_kwargs)
+        output = self._model(
+            image=image, prompt=prompt, height=height, width=width, **generate_kwargs
+        )
+        return self._output_to_video(output, fps, response_format)
+
+    def _process_image(self, image: PIL.Image, max_area: int) -> PIL.Image:
+        assert self._model is not None
+        aspect_ratio = image.height / image.width
+        mod_value = (
+            self._model.vae_scale_factor_spatial
+            * self._model.transformer.config.patch_size[1]
+        )
+        height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
+        width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
+        return image.resize((width, height))
+
+    def _output_to_video(self, output: Any, fps: int, response_format: str):
+        import gc
+
+        # cv2 bug will cause the video cannot be normally displayed
+        # thus we use the imageio one
+        from diffusers.utils import export_to_video
+
+        from ...device_utils import empty_cache
 
         # clean cache
         gc.collect()
@@ -173,7 +312,12 @@ class DiffUsersVideoModel:
         urls = []
         for f in output.frames:
             path = os.path.join(XINFERENCE_VIDEO_DIR, uuid.uuid4().hex + ".mp4")
-            p = export_to_video_imageio(f, path, fps=8)
+            export = (
+                export_to_video
+                if self.model_spec.model_family != "CogVideoX"
+                else export_to_video_imageio
+            )
+            p = export(f, path, fps=fps)
             urls.append(p)
         if response_format == "url":
             return VideoList(

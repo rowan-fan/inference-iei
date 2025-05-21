@@ -20,6 +20,9 @@ export const llmAllDataKey = [
   'gguf_model_path',
   'cpu_offload',
   'peft_model_config',
+  'quantization_config',
+  'enable_thinking',
+  'multimodal_projectors',
 ]
 
 export const additionalParameterTipList = {
@@ -34,11 +37,16 @@ export const additionalParameterTipList = {
     'scheduling_policy',
     'tensor_parallel_size',
     'pipeline_parallel_size',
-    'enable_prefix_cache',
+    'enable_prefix_caching',
     'enable_chunked_prefill',
     'enforce_eager',
     'cpu_offload_gb',
     'disable_custom_all_reduce',
+    'limit_mm_per_prompt',
+    'model_quantization',
+    'mm_processor_kwargs',
+    'min_pixels',
+    'max_pixels',
   ],
   'sglang': [
     'mem_fraction_static',
@@ -53,19 +61,33 @@ export const additionalParameterTipList = {
   'mlx': ['cache_limit_gb', 'max_kv_size'],
 }
 
+export const quantizationParametersTipList = [
+  'load_in_8bit',
+  'load_in_4bit',
+  'llm_int8_threshold',
+  'llm_int8_skip_modules',
+  'llm_int8_enable_fp32_cpu_offload',
+  'llm_int8_has_fp16_weight',
+  'bnb_4bit_compute_dtype',
+  'bnb_4bit_quant_type',
+  'bnb_4bit_use_double_quant',
+  'bnb_4bit_quant_storage',
+]
+
 export const featureModels = [
   {
     type: 'llm',
     feature_models: [
+      'qwen3',
       'deepseek-v3',
       'deepseek-r1',
       'deepseek-r1-distill-qwen',
       'deepseek-r1-distill-llama',
       'qwen2.5-instruct',
       'qwen2.5-vl-instruct',
-      'qwen2.5-coder-instruct',
-      'llama-3.1-instruct',
+      'glm4-0414',
       'QwQ-32B',
+      'gemma-3-it',
     ],
   },
   {

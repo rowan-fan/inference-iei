@@ -9,8 +9,24 @@ If you aim to serve all supported models, you can install all the necessary depe
 
    pip install "xinference[all]"
 
-.. note::
-   If you want to serve models in GGUF format, it's advised to install the ``llama-cpp-python`` dependency manually based on your hardware specifications to enable acceleration. For more details, see the :ref:`installation_gguf` section.
+
+Several usage scenarios require special attention.
+
+.. admonition:: **GGUF format** with **llama.cpp engine**
+
+   In this situation, it's advised to install its dependencies manually based on your hardware specifications to enable acceleration. For more details, see the :ref:`installation_gguf` section.
+
+.. admonition:: **AWQ or GPTQ** format with **transformers engine**
+
+   **This section is added in v1.6.0.**
+
+   This is because the dependencies at this stage require special options and are difficult to install. Please run command below in advance
+
+   .. code-block:: bash
+
+      pip install "xinference[transformers_quantization]" --no-build-isolation
+
+   Some dependencies like ``transformers`` might be downgraded, you can run ``pip install "xinference[all]"`` afterwards.
 
 
 If you want to install only the necessary backends, here's a breakdown of how to do it.
@@ -47,25 +63,29 @@ Currently, supported models include:
 - ``deepseek``, ``deepseek-coder``, ``deepseek-chat``, ``deepseek-coder-instruct``, ``deepseek-r1-distill-qwen``, ``deepseek-v2-chat``, ``deepseek-v2-chat-0628``, ``deepseek-v2.5``, ``deepseek-v3``, ``deepseek-r1``, ``deepseek-r1-distill-llama``
 - ``yi-coder``, ``yi-coder-chat``
 - ``codeqwen1.5``, ``codeqwen1.5-chat``
-- ``qwen2.5``, ``qwen2.5-coder``, ``qwen2.5-instruct``, ``qwen2.5-coder-instruct``
+- ``qwen2.5``, ``qwen2.5-coder``, ``qwen2.5-instruct``, ``qwen2.5-coder-instruct``, ``qwen2.5-instruct-1m``
 - ``baichuan-2-chat``
 - ``internlm2-chat``
 - ``internlm2.5-chat``, ``internlm2.5-chat-1m``
 - ``qwen-chat``
 - ``mixtral-instruct-v0.1``, ``mixtral-8x22B-instruct-v0.1``
 - ``chatglm3``, ``chatglm3-32k``, ``chatglm3-128k``
-- ``glm4-chat``, ``glm4-chat-1m``
+- ``glm4-chat``, ``glm4-chat-1m``, ``glm4-0414``
 - ``codegeex4``
 - ``qwen1.5-chat``, ``qwen1.5-moe-chat``
 - ``qwen2-instruct``, ``qwen2-moe-instruct``
 - ``QwQ-32B-Preview``, ``QwQ-32B``
 - ``marco-o1``
-- ``gemma-it``, ``gemma-2-it``
+- ``fin-r1``
+- ``seallms-v3``
+- ``skywork-or1-preview``
+- ``gemma-it``, ``gemma-2-it``, ``gemma-3-1b-it``
 - ``orion-chat``, ``orion-chat-rag``
 - ``c4ai-command-r-v01``
 - ``minicpm3-4b``
 - ``internlm3-instruct``
 - ``moonlight-16b-a3b-instruct``
+- ``qwen3``
 .. vllm_end
 
 To install Xinference and vLLM::
@@ -82,13 +102,39 @@ To install Xinference and vLLM::
 
 Llama.cpp Backend
 ~~~~~~~~~~~~~~~~~
-Xinference supports models in ``gguf`` format via ``llama-cpp-python``. It's advised to install the llama.cpp-related dependencies manually based on your hardware specifications to enable acceleration.
+Xinference supports models in ``gguf`` format via ``xllamacpp`` or ``llama-cpp-python``.
+`xllamacpp <https://github.com/xorbitsai/xllamacpp>`_ is developed by Xinference team,
+and will be the sole backend for llama.cpp in the future.
+
+.. note::
+
+    ``xllamacpp`` is the default option for llama.cpp backend since v1.5.0.
+    To enable ``llama-cpp-python``, add environment variable ``USE_XLLAMACPP=0``.
+
+.. warning::
+
+    Since Xinference v1.5.0, ``llama-cpp-python`` will be deprecated.
+    For Xinference v1.6.0, ``llama-cpp-python`` will be removed.
 
 Initial setup::
 
    pip install xinference
 
-Hardware-Specific installations:
+Installation instructions for ``xllamacpp``:
+
+- CPU or Mac Metal::
+
+   pip install -U xllamacpp
+
+- CUDA::
+
+   pip install xllamacpp --force-reinstall --index-url https://xorbitsai.github.io/xllamacpp/whl/cu124
+
+- HIP::
+
+   pip install xllamacpp --force-reinstall --index-url https://xorbitsai.github.io/xllamacpp/whl/rocm-6.0.2
+
+Hardware-Specific installations for ``llama-cpp-python``:
 
 - Apple Silicon::
 

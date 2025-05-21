@@ -4,7 +4,8 @@
     "runningModels": "Running Models",
     "registerModel": "Register Model",
     "clusterInfo": "Cluster Information",
-    "contactUs": "Contact Us"
+    "contactUs": "Contact Us",
+    "documentation": "Documentation"
   },
 
   "model": {
@@ -24,9 +25,9 @@
     "chat": "chat",
     "vision": "vl-chat",
     "reasoning": "reasoning",
-    "text-to-audio": "text-to-audio",
-    "audio-to-text": "audio-to-text",
-    "audio-to-audio": "audio-to-audio",
+    "text2audio": "text2audio",
+    "audio2text": "audio2text",
+    "audio2audio": "audio2audio",
     "status": "Status",
     "cached": "Cached",
     "manageCachedModels": "Manage Cached Models",
@@ -52,8 +53,9 @@
     "modelFormat": "Model Format",
     "modelSize": "Model Size",
     "quantization": "Quantization",
-    "nGPU": "GPU Count",
-    "nGPUPerWorker": "GPU Count Per Worker",
+    "multimodelProjector": "Multimodel Projector",
+    "nGPU": "GPU Count per Replica",
+    "nGPUPerWorker": "GPU Count per Worker",
     "nGpuLayers": "N GPU Layers",
     "replica": "Replica",
     "optionalConfigurations": "Optional Configurations",
@@ -68,11 +70,13 @@
     "modelPath.optional": "(Optional) Model Path, For PyTorch, provide the model directory. For GGML/GGUF, provide the model file path.",
     "GGUFQuantization.optional": "(Optional) GGUF quantization format, quantizing the Transformer part.",
     "GGUFModelPath.optional": "(Optional) GGUF model path, should be a file ending with .gguf.",
+    "enableThinking": "Enable Thinking",
     "parsingReasoningContent": "Parsing Reasoning Content",
     "CPUOffload": "CPU Offload",
     "CPUOffload.tip": "Unload the model to the CPU. Recommend to enable this when resources are limited or when using the GGUF option.",
     "loraConfig": "Lora Config",
     "loraModelConfig": "Lora Model Config",
+    "additionalQuantizationParametersForInferenceEngine": "Additional quantization parameters passed to the inference engine",
     "additionalParametersForInferenceEngine": "Additional parameters passed to the inference engine",
     "enterIntegerGreaterThanZero": "Please enter an integer greater than 0.",
     "enterCommaSeparatedNumbers": "Please enter numeric data separated by commas, for example: 0,1,2",
@@ -99,7 +103,8 @@
     "confirmDeleteCacheFiles": "Confirm deletion of cache files? This action is irreversible.",
     "commandLineTip": "Please confirm whether the model names are consistent.",
     "featured": "featured",
-    "all": "all"
+    "all": "all",
+    "cancelledSuccessfully": "Cancelled Successfully!"
   },
 
   "runningModels": {

@@ -24,7 +24,7 @@ import torch
 from ..._compat import ROOT_KEY, ErrorWrapper, ValidationError
 from ...device_utils import empty_cache
 from ...types import Embedding, EmbeddingData, EmbeddingUsage
-from ..core import CacheableModelSpec, ModelDescription
+from ..core import CacheableModelSpec, ModelDescription, VirtualEnvSettings
 from ..utils import get_cache_dir, is_model_cached
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class EmbeddingModelSpec(CacheableModelSpec):
     model_id: str
     model_revision: Optional[str]
     model_hub: str = "huggingface"
+    virtualenv: Optional[VirtualEnvSettings]
 
 
 class EmbeddingModelDescription(ModelDescription):
@@ -69,6 +70,10 @@ class EmbeddingModelDescription(ModelDescription):
     ):
         super().__init__(address, devices, model_path=model_path)
         self._model_spec = model_spec
+
+    @property
+    def spec(self):
+        return self._model_spec
 
     def to_dict(self):
         return {
@@ -646,19 +651,27 @@ class EmbeddingModel:
                 img = Image.open(image_data)
                 return img
 
-            objs: list[dict[str, str]] = []
-            for item in sentences:
-                if isinstance(item, dict):
-                    if item.get("text") is not None:
-                        objs.append(item["text"])
-                    elif item.get("image") is not None:
-                        if re.match(r"^data:image/.+;base64,", item["image"]):
-                            image = base64_to_image(item["image"])
-                            objs.append(image)
+            objs: list[str] = []
+            if isinstance(sentences, str):
+                objs.append(sentences)
+            else:
+                for item in sentences:
+                    if isinstance(item, dict):
+                        if item.get("text") is not None:
+                            objs.append(item["text"])
+                        elif item.get("image") is not None:
+                            if re.match(r"^data:image/.+;base64,", item["image"]):
+                                image = base64_to_image(item["image"])
+                                objs.append(image)
+                            else:
+                                objs.append(item["image"])
                         else:
-                            objs.append(item["image"])
+                            raise ValueError("Please check the input data.")
+                    elif isinstance(item, str):
+                        objs.append(item)
                     else:
-                        logger.error("Please check the input data.")
+                        raise ValueError("Please check the input data.")
+
             all_embeddings, all_token_nums = encode(
                 self._model,
                 objs,
