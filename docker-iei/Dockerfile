@@ -1,6 +1,11 @@
-FROM xinference-iei:v1.3.0.post2-0.7.3-0.4.3-cpu
+FROM xprobe/xinference:v1.6.0.post1
 
 ADD ./xinference /usr/local/lib/python3.10/dist-packages/xinference
+
+RUN pip install --upgrade pip \
+    && pip install -U "magic-pdf[full]" -i https://mirrors.aliyun.com/pypi/simple \
+    && pip uninstall -y magic-pdf \
+    && rm -rf /root/.cache/pip
 
 WORKDIR /workspace
 ADD docker-iei/run.py /workspace/run.py
