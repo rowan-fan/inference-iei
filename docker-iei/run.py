@@ -192,6 +192,7 @@ class NvidiaManager(AcceleratorManager):
         logging.info(f"Custom allocated GPUs {gpu_idxs} for {model_type} model")
         return len(gpu_idxs), gpu_idxs
 
+
 class CpuManager(AcceleratorManager):
     """
     CPU manager implementation.
@@ -226,6 +227,144 @@ class CpuManager(AcceleratorManager):
         """
         logging.info(f"Running {model_type} model in CPU mode")
         return 1, [0]
+
+class MXManager(AcceleratorManager):
+    """
+    MX GPU manager implementation.
+    Handles allocation and management of MX GPUs.
+    """
+    
+    def __init__(self, allocation_strategy: str = "default"):
+        """
+        Initialize MX GPU manager.
+        
+        Args:
+            allocation_strategy: Strategy for GPU allocation, defaults to "default"
+        """
+        self._gpu_path = "/dev/dri/"
+        self._allocation_status = []  # Track allocation count per GPU
+        self._allocation_strategy = allocation_strategy
+        self._init_allocation_status()
+    
+    def _init_allocation_status(self):
+        """Initialize GPU allocation tracking"""
+        count = self.get_accelerator_count()
+        self._allocation_status = [0] * count
+        
+    def get_accelerator_count(self) -> int:
+        """
+        Get count of available MX GPUs by checking renderD* devices.
+        
+        Returns:
+            int: Number of available MX GPUs, 0 if none found
+        """
+        try:
+            # Check for MX GPU render devices
+            import glob
+            render_devices = glob.glob("/dev/dri/renderD*")
+            count = len(render_devices)
+            
+            if count > 0:
+                logging.info(f"Found {count} MX GPUs")
+                return count
+            else:
+                logging.error("No MX GPUs detected")
+                return 0
+        except Exception as e:
+            logging.error(f"MX GPU detection error: {str(e)}")
+            return 0
+            
+    def allocate_accelerators(self, model_type: str, required_count: int = 1, gpu_idxs: List[int] = None) -> tuple[int, list[int]]:
+        """
+        Allocate MX GPUs based on model requirements.
+        
+        Args:
+            model_type: Type of model requesting allocation
+            required_count: Number of GPUs needed
+            gpu_idxs: Optional list of specific GPU indices to use
+            
+        Returns:
+            tuple[int, list[int]]: Number of allocated GPUs and their indices
+            
+        Raises:
+            Exception: If no GPUs available or insufficient GPUs
+        """
+        total_gpus = self.get_accelerator_count()
+        
+        if total_gpus == 0:
+            raise Exception("No MX GPUs available")
+            
+        if gpu_idxs is not None:
+            return self._custom_allocation(model_type, required_count, total_gpus, gpu_idxs)
+        else:
+            return self._default_allocation(model_type, required_count, total_gpus)
+
+    def _default_allocation(self, model_type: str, required_count: int, total_gpus: int) -> tuple[int, list[int]]:
+        """
+        Default GPU allocation strategy.
+        
+        Args:
+            model_type: Type of model requesting allocation
+            required_count: Number of GPUs needed  
+            total_gpus: Total available GPUs
+            
+        Returns:
+            tuple[int, list[int]]: Number of allocated GPUs and their indices
+            
+        Raises:
+            Exception: If insufficient GPUs available
+        """
+        if model_type == 'LLM':
+            # Allocate all GPUs for LLM models
+            self._allocation_status = [v+1 for v in self._allocation_status]
+            logging.info(f"Allocated all {total_gpus} MX GPUs for LLM model")
+            return total_gpus, list(range(total_gpus))
+        else:
+            # Allocate least loaded GPUs for other models
+            if total_gpus < required_count:
+                raise Exception(f"Insufficient MX GPUs, {required_count} required but only {total_gpus} available")
+                
+            available_gpus = []
+            for _ in range(required_count):
+                idx = self._allocation_status.index(min(self._allocation_status))
+                self._allocation_status[idx] += 1
+                available_gpus.append(idx)
+            
+            logging.info(f"Allocated MX GPUs {available_gpus} for {model_type} model")    
+            return required_count, available_gpus
+
+    def _custom_allocation(self, model_type: str, required_count: int, total_gpus: int, gpu_idxs: List[int]) -> tuple[int, list[int]]:
+        """
+        Custom GPU allocation using specified indices.
+        
+        Args:
+            model_type: Type of model requesting allocation
+            required_count: Number of GPUs needed
+            total_gpus: Total available GPUs
+            gpu_idxs: List of specific GPU indices to use
+            
+        Returns:
+            tuple[int, list[int]]: Number of allocated GPUs and their indices
+            
+        Raises:
+            ValueError: If invalid GPU indices specified
+            Exception: If insufficient GPUs specified
+        """
+        # Validate GPU indices
+        for idx in gpu_idxs:
+            if idx >= total_gpus or idx < 0:
+                raise ValueError(f"Invalid GPU index {idx}, must be between 0 and {total_gpus-1}")
+        
+        # Verify sufficient GPUs
+        if len(gpu_idxs) < required_count:
+            raise Exception(f"Insufficient GPUs specified, {required_count} required but only {len(gpu_idxs)} provided")
+        
+        # Allocate specified GPUs
+        for idx in gpu_idxs:
+            self._allocation_status[idx] += 1
+            
+        logging.info(f"Custom allocated MX GPUs {gpu_idxs} for {model_type} model")
+        return len(gpu_idxs), gpu_idxs
 
 class ConfigValidator(Protocol):
     """Protocol defining configuration validation interface"""
@@ -513,12 +652,17 @@ class ModelLauncher:
         
         # Try to initialize NVIDIA manager first
         nvidia_manager = NvidiaManager()
+        mx_manager = MXManager()
         if nvidia_manager.get_accelerator_count() > 0:
             self.accelerator_manager = nvidia_manager
             logging.info("Using NVIDIA GPU acceleration")
+        elif mx_manager.get_accelerator_count() > 0:
+            self.accelerator_manager = mx_manager
+            logging.info("Using MX GPU acceleration")
         else:
+            # If no GPUs available, use CPU
             self.accelerator_manager = CpuManager()
-            logging.info("No NVIDIA GPUs found, falling back to CPU mode")
+            logging.info("No GPUs found, falling back to CPU mode")
 
     def _determine_model_engine(self, model_name: str, model_format: str, n_gpu: Union[int, str]) -> str:
         """
@@ -538,6 +682,7 @@ class ModelLauncher:
         if not [m for m in model_list if not m['model_name'] == model_name]:
             raise Exception("No matching model found")
         engine_list = self.client.query_engine_by_model_name(model_name)
+        print(f"engline list : {engine_list}")
 
         # Validate specified engine
         if self.args.model_engine:

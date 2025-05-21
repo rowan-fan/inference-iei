@@ -385,12 +385,19 @@ class ChatModelMixin:
         reasoning_parser: Optional[ReasoningParser] = None,
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
         i = 0
+        first_token_content = None
         previous_texts = [""]
         async for chunk in chunks:
             if i == 0:
-                chat_chunk = cls._get_first_chat_completion_chunk(
-                    chunk, reasoning_parser
-                )
+                # 保存第一个token内容
+                if chunk.get("choices") and chunk["choices"][0].get("text"):
+                    first_token_content = chunk["choices"][0]["text"]
+                chat_chunk = cls._get_first_chat_completion_chunk(chunk, reasoning_parser)
+            elif i == 1 and first_token_content:
+                # 将第一个token内容合并到第二个chunk
+                if chunk.get("choices") and chunk["choices"][0].get("text"):
+                    chunk["choices"][0]["text"] = first_token_content + chunk["choices"][0]["text"]
+                chat_chunk = cls._to_chat_completion_chunk(chunk, reasoning_parser, previous_texts)
             elif not chunk.get("choices"):
                 # usage
                 chat_chunk = cls._get_final_chat_completion_chunk(chunk)
