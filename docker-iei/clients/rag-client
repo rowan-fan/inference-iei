@@ -1,0 +1,675 @@
+#!/usr/bin/python3
+"""
+A client script for deploying and managing RAG (Retrieval-Augmented Generation) services.
+This script handles deployment, configuration and management of various model services
+including embedding models, vision-language models and Ollama models.
+
+Key features:
+- Kubernetes deployment management
+- Model registration with Epaichat service
+- YAML configuration handling
+- Logging and error handling
+- Configurable embedding models selection
+"""
+
+import os
+import sys
+import yaml
+import argparse
+import subprocess
+import requests
+import json
+import logging
+import functools
+import time
+import copy
+from datetime import datetime
+from requests import Response
+from typing import Dict, Any, Optional, List, Union
+from abc import ABC, abstractmethod
+
+# Import configuration from config.py
+from config import (
+    union_request_list, separate_request_list, full_request_list,
+    rag_config_yaml, vl_config_yaml, ollama_config_yaml, custom_config_yaml,
+    rag_config_gpu_yaml, vl_config_gpu_yaml, ollama_config_gpu_yaml, custom_config_gpu_yaml, custom_unoin_config_gpu_yaml,
+    ns_yaml, rag_svc_yaml, vl_cpu_svc_yaml, vl_gpu_svc_yaml,
+    ollama_svc_yaml, custom_svc_yaml, custom_unoin_svc_yaml,
+    param_rags, param_vl, param_union,
+    rags_output_path, union_output_path
+)
+
+FULL_DEPLOY_DICT = {
+    'rag': 'rag_template',
+    'vl': 'vl_template',
+    'ollama': 'ollama_template',
+    'custom': 'custom_template',
+}
+
+UNION_DEPLOY_DICT = {
+    'ollama': 'ollama_template',
+    'custom': 'custom_template',
+}
+
+DEPLOY_DICT = dict(FULL_DEPLOY_DICT)
+
+class ConfigHandler:
+    """Handler for configuration operations with param_rags and param_union"""
+    def __init__(self):
+        self.logger = Logger()
+        self.embedding_models_map = {}
+        self._initialize_model_map()
+
+    def _initialize_model_map(self):
+        """Initialize the mapping from index to model name"""
+        idx = 1
+        for model in param_rags:
+            if model["modelType"] == "embedding":
+                self.embedding_models_map[str(idx)] = model["modelName"]
+                idx += 1
+        
+    def read_config_from_string(self, config_string: str) -> List[Dict[str, Any]]:
+        """Read configuration from a string"""
+        try:
+            return json.loads(config_string)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse config string: {e}")
+            return []
+
+    def read_config_from_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """Read configuration from a file"""
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            self.logger.error(f"Failed to read config from {file_path}: {e}")
+            return []
+
+    def write_config_to_file(self, config: List[Dict[str, Any]], file_path: str) -> bool:
+        """Write configuration to a file"""
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            with open(file_path, 'w') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"Successfully wrote config to {file_path}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to write config to {file_path}: {e}")
+            return False
+
+    def filter_models(self, models: List[Dict[str, Any]], specified_models: List[str]) -> List[Dict[str, Any]]:
+        """
+        Filter models based on specified models (can be numbers or names)
+        Keep all non-embedding models intact
+        """
+        if not specified_models or specified_models == ["default"]:
+            return copy.deepcopy(models)
+        
+        # If specified_models contains numbers, convert them to model names
+        model_names = []
+        for model in specified_models:
+            if model in self.embedding_models_map:
+                model_names.append(self.embedding_models_map[model])
+            else:
+                model_names.append(model)
+        
+        # Keep non-embedding models and filter embedding models
+        filtered_models = []
+        for model in models:
+            if model["modelType"] != "embedding" or model["modelName"] in model_names:
+                filtered_models.append(copy.deepcopy(model))
+        
+        return filtered_models
+
+    def list_available_models(self) -> None:
+        """List all available embedding models"""
+        print("Available embedding models:")
+        for idx, model_name in self.embedding_models_map.items():
+            print(f"{idx}. {model_name}")
+
+class YamlHandler(ABC):
+    """Base class for YAML configuration handling"""
+    def __init__(self, yaml_data: Dict[str, Any]):
+        self.data = yaml_data
+        self.logger = Logger()
+
+    @abstractmethod
+    def set_node_affinity(self, node_affinity: Union[List[str], None]) -> None:
+        """Set node affinity for the service"""
+        pass
+
+    @abstractmethod 
+    def set_node_selector(self, use_any_nodes: Union[bool, None]) -> None:
+        """Configure node selector settings"""
+        pass
+
+    @abstractmethod
+    def set_replicas(self, replicas: int) -> None:
+        """Set number of service replicas"""
+        pass
+
+    @abstractmethod
+    def set_resources(self, num_gpus: int = None, cpus: int = None, memory: str = None, gpu_type: str = "nvidia.com/gpu") -> None:
+        """Configure compute resources for the service"""
+        pass
+
+    @abstractmethod
+    def update_env_vars(self, env_vars: Dict[str, Any]) -> None:
+        """Update environment variables for the service"""
+        pass
+
+    def set_annotations(self, raw_deployment: bool = True, auto_scaler: str = "hpa",
+                       target_cpu: str = "90") -> None:
+        """Set Kubernetes annotations for the service"""
+        annotations = {
+            "serving.kserve.io/autoscalerClass": auto_scaler,
+            "serving.kserve.io/metric": "cpu", 
+            "serving.kserve.io/targetUtilizationPercentage": target_cpu,
+            "sidecar.istio.io/inject": "true"
+        }
+        if raw_deployment:
+            annotations["serving.kserve.io/deploymentMode"] = "RawDeployment"
+            
+        self.data["metadata"]["annotations"].update(annotations)
+
+class ModelYamlHandler(YamlHandler):
+    """Handler for YAML configurations using model field"""
+    def set_node_affinity(self, node_affinity: Union[List[str], None]) -> None:
+        """Set node affinity for model-based services"""
+        self.logger.info(f"Setting node affinity to {node_affinity}")
+        if node_affinity:
+            self.data['spec']['predictor']['affinity'] = {
+                'nodeAffinity': {
+                    'preferredDuringSchedulingIgnoredDuringExecution': [{
+                        'weight': 100,
+                        'preference': {
+                            'matchExpressions': [{
+                                'key': 'kubernetes.io/hostname',
+                                'operator': 'In',
+                                'values': node_affinity
+                            }]
+                        }
+                    }]
+                }
+            }
+        else:
+            if 'affinity' in self.data['spec']['predictor']:
+                del self.data['spec']['predictor']['affinity']
+
+    def set_node_selector(self, use_any_nodes: Union[bool, None]) -> None:
+        """Configure node selector for model-based services"""
+        if use_any_nodes == "true":
+            del self.data['spec']['predictor']['nodeSelector']
+
+    def set_replicas(self, replicas: int) -> None:
+        """Set replica count for model-based services"""
+        self.logger.info(f"Setting replica count to {replicas}")
+        self.data["metadata"]["annotations"]["autoscaling.knative.dev/target"] = f"{replicas}"
+        self.data["spec"]["predictor"]["maxReplicas"] = replicas
+        self.data["spec"]["predictor"]["minReplicas"] = replicas
+
+    def set_resources(self, num_gpus: int = None, cpus: int = None, memory: str = None, gpu_type: str = "nvidia.com/gpu") -> None:
+        """Configure compute resources for model-based services"""
+        if num_gpus is not None:
+            self.logger.info(f"Setting GPU count to {gpu_type}: {num_gpus}")
+            self.data['spec']['predictor']['model']['resources']['limits'][gpu_type] = num_gpus
+            self.data['spec']['predictor']['model']['resources']['requests'][gpu_type] = num_gpus
+        
+        if gpu_type == "nvidia.com/gpu":
+            self.logger.info(f"Setting GPU type to llmserver")
+            self.data['spec']['predictor']['model']['runtime'] = 'llmserver'
+        else:
+            self.logger.info(f"Setting GPU type to llmserver-mx")
+            self.data['spec']['predictor']['model']['runtime'] = 'llmserver-mx'
+        
+        if cpus is not None:
+            self.logger.info(f"Setting CPU count to {cpus}")
+            self.data['spec']['predictor']['model']['resources']['limits']['cpu'] = cpus
+            self.data['spec']['predictor']['model']['resources']['requests']['cpu'] = cpus
+            
+        if memory is not None:
+            self.logger.info(f"Setting memory to {memory}")
+            self.data['spec']['predictor']['model']['resources']['limits']['memory'] = memory
+            self.data['spec']['predictor']['model']['resources']['requests']['memory'] = memory
+
+    def update_env_vars(self, env_vars: Dict[str, Any]) -> None:
+        """Update environment variables for model-based services"""
+        self.logger.info(f"Setting environment variables to {env_vars}")
+        env_list = self.data['spec']['predictor']['model']['env']
+        env_dict = {env['name']: env['value'] for env in env_list}
+        
+        if isinstance(env_dict, dict) and isinstance(env_vars, dict):
+            env_dict.update(env_vars)
+        
+        self.data['spec']['predictor']['model']['env'] = [
+            {'name': k, 'value': v} for k, v in env_dict.items()
+        ]
+
+class ContainerYamlHandler(YamlHandler):
+    """Handler for YAML configurations using containers field"""
+    def set_node_affinity(self, node_affinity: Union[List[str], None]) -> None:
+        """Set node affinity for container-based services"""
+        self.logger.info(f"Setting node affinity to {node_affinity}")
+        if node_affinity:
+            self.data['spec']['predictor']['affinity'] = {
+                'nodeAffinity': {
+                    'preferredDuringSchedulingIgnoredDuringExecution': [{
+                        'weight': 100,
+                        'preference': {
+                            'matchExpressions': [{
+                                'key': 'kubernetes.io/hostname',
+                                'operator': 'In',
+                                'values': node_affinity
+                            }]
+                        }
+                    }]
+                }
+            }
+        else:
+            if 'affinity' in self.data['spec']['predictor']:
+                del self.data['spec']['predictor']['affinity']
+
+    def set_node_selector(self, use_any_nodes: Union[bool, None]) -> None:
+        """Configure node selector for container-based services"""
+        if use_any_nodes == "true":
+            del self.data['spec']['predictor']['nodeSelector']
+
+    def set_replicas(self, replicas: int) -> None:
+        """Set replica count for container-based services"""
+        self.logger.info(f"Setting replica count to {replicas}")
+        self.data["metadata"]["annotations"]["autoscaling.knative.dev/target"] = f"{replicas}"
+        self.data["spec"]["predictor"]["maxReplicas"] = replicas
+        self.data["spec"]["predictor"]["minReplicas"] = replicas
+
+    def set_resources(self, num_gpus: int = None, cpus: int = None, memory: str = None, gpu_type: str = "nvidia.com/gpu") -> None:
+        """Configure compute resources for container-based services"""
+        if num_gpus is not None:
+            self.logger.info(f"Setting GPU count to {num_gpus}")
+            self.data['spec']['predictor']['containers'][0]['resources']['limits'][gpu_type] = num_gpus
+            self.data['spec']['predictor']['containers'][0]['resources']['requests'][gpu_type] = num_gpus
+        
+        if cpus is not None:
+            self.logger.info(f"Setting CPU count to {cpus}")
+            self.data['spec']['predictor']['containers'][0]['resources']['limits']['cpu'] = cpus
+            self.data['spec']['predictor']['containers'][0]['resources']['requests']['cpu'] = cpus
+            
+        if memory is not None:
+            self.logger.info(f"Setting memory to {memory}")
+            self.data['spec']['predictor']['containers'][0]['resources']['limits']['memory'] = memory
+            self.data['spec']['predictor']['containers'][0]['resources']['requests']['memory'] = memory
+
+    def update_env_vars(self, env_vars: Dict[str, Any]) -> None:
+        """Update environment variables for container-based services"""
+        self.logger.info(f"Setting environment variables to {env_vars}")
+        env_list = self.data['spec']['predictor']['containers'][0].get('env', [])
+        env_dict = {env['name']: env['value'] for env in env_list}
+        
+        if isinstance(env_dict, dict) and isinstance(env_vars, dict):
+            env_dict.update(env_vars)
+        
+        self.data['spec']['predictor']['containers'][0]['env'] = [
+            {'name': k, 'value': v} for k, v in env_dict.items()
+        ]
+
+class Singleton(type):
+    """Metaclass for implementing the Singleton pattern"""
+    _instances = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+class Logger(metaclass=Singleton):
+    """Singleton logger class for centralized logging"""
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self._setup_logger()
+        
+    def _setup_logger(self):
+        """Configure logging settings"""
+        logging.basicConfig(level=logging.INFO,
+                          format='[%(asctime)s][%(filename)s:%(lineno)d] %(levelname)s %(message)s',
+                          datefmt='%Y-%m-%d %H:%M:%S')
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        if not os.path.exists(log_dir):
+            os.mkdir(log_dir)
+        log_file = os.path.join(log_dir, f"log_{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.log")
+        self.logger.addHandler(logging.FileHandler(log_file))
+    
+    def info(self, msg): self.logger.info(msg)
+    def error(self, msg): self.logger.error(msg)
+
+def parse_argument() -> argparse.Namespace:
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description="Deploy embedding models")
+    parser.add_argument('--headers', type=str, nargs='*', help="Headers in the format KEY:VALUE", default=dict())
+    parser.add_argument('--deploy', action='store_true', help="Deploy the service after modify the YAML")
+    parser.add_argument('--delete', action="store_true", help="Delete the deployed service")
+    parser.add_argument('--cpu-mode', action="store_true", help="Override config file and deploy service with CPU only")
+    parser.add_argument('--gpu-mode', action="store_true", help="Override config file and deploy service with GPU only")
+    parser.add_argument('--override', action="store_true", help="Override config file with current config")
+    parser.add_argument('--union-mode', action="store_true", help="Deploy VL RAG and custom in a custom pod")
+    parser.add_argument('--specify-embeddings', type=str, nargs='*', 
+                      help="Specify which embedding models to deploy. Can be model names or numbers: "
+                           "1=bce-embedding-base_v1, 2=bge-large-zh-v1.5, 3=Yuan-embedding-1.0, 4=text2vec-base-chinese. "
+                           "Use spaces to separate multiple models. Use 'default' to restore all models. "
+                           "Use --list-embeddings to see available models and their numbers.")
+    parser.add_argument('--list-embeddings', action="store_true", 
+                      help="List all available embedding models and their corresponding numbers")
+    args = parser.parse_args()
+    return args
+
+def retry(retries = 30, delay=10, enable_retry = True):
+    """Decorator for implementing retry logic"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if not enable_retry:
+                        raise
+                    attempt += 1
+                    if attempt >= retries:
+                        raise
+                    logging.error(f"[{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}] Operation failed with error: {e}. Retrying in {delay} seconds... (Attempt {attempt})")
+                    time.sleep(delay)
+        return wrapper
+    return decorator
+
+
+class KubernetesHandler:
+    """Handler for Kubernetes operations"""
+    def __init__(self):
+        self.logger = Logger()
+
+    def apply(self, yaml_file: str) -> None:
+        """Apply Kubernetes configuration from YAML file"""
+        result = subprocess.run(["kubectl", "apply", "-f", yaml_file], capture_output=True)
+        if result.returncode == 0:
+            self.logger.info("Successfully deployed configuration")
+        else:
+            self.logger.error(f"Failed to deploy configuration: {result.stderr}")
+            
+    def delete(self, yaml_file: str) -> None:
+        """Delete Kubernetes resources defined in YAML file"""
+        result = subprocess.run(["kubectl", "delete", "-f", yaml_file], capture_output=True)
+        if result.returncode == 0:
+            self.logger.info("Successfully deleted resources")
+        elif "NotFound" in str(result.stderr):
+            self.logger.info("Resources already deleted")
+        else:
+            self.logger.error(f"Failed to delete resources: {result.stderr}")
+
+    @retry(enable_retry = '--headers' not in sys.argv)
+    def get_service_ip(self, service_name: str, namespace: str = "default") -> str:
+        """Get cluster IP address for a Kubernetes service"""
+        cmd = ["kubectl", "get", "service", service_name, "-n", namespace, "-o", "json"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            service_info = json.loads(result.stdout)
+            cluster_ip = service_info['spec']['clusterIP']
+            return cluster_ip
+        except Exception as e:
+            self.logger.error(f"Failed to get cluster IP for service {service_name}: {e}")
+            raise e
+
+class EpaichatHandler:
+    """Handler for Epaichat API operations"""
+    def __init__(self, epai_ip: str, epai_port: int = 5051, union_mode: bool = False, vl_use_cpu:bool = False):
+        self.logger = Logger()
+        self.epai_ip = epai_ip
+        self.epai_port = epai_port
+        self.base_url = f"http://{epai_ip}:{epai_port}/v1.0/models"
+        # Process model list
+        self.union_mode = union_mode
+        self.vl_use_cpu = vl_use_cpu
+        self.request_list = union_request_list if self.union_mode else separate_request_list
+        if not self.union_mode:
+            if self.vl_use_cpu:
+                del self.request_list[-2]
+            else:
+                del self.request_list[-1]
+        else:
+            del self.request_list[-1]
+        
+        
+    def _prepare_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
+        """准备请求头"""
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = "AIStation"
+        return headers
+
+    @retry(enable_retry = '--headers' not in sys.argv)
+    def add_models(self, headers: Dict[str, str]) -> None:
+        """添加模型"""
+        headers = self._prepare_headers(headers)
+        
+
+        for data in self.request_list:
+            try:
+                self.logger.info(f'URL: {self.base_url}/add \ndata={data} \nheaders={headers}')
+                res = requests.post(
+                    url=f"{self.base_url}/add",
+                    json=data,
+                    headers=headers,
+                    timeout=3
+                )
+                self.logger.info(f"响应: {res.text}")
+                
+                if res.ok:
+                    res_data = json.loads(res.content)
+                    if res_data["flag"]:
+                        continue
+                    self.logger.error(f"添加模型失败: {res_data['errCode']} - {res_data['errMsg']}")
+                else:
+                    self.logger.error("添加模型时发生错误")
+                    raise Exception("Epaichat服务器错误")
+                    
+            except Exception as e:
+                self.logger.error(f"添加模型时发生错误: {e}")
+                raise
+
+    @retry(enable_retry = '--headers' not in sys.argv)
+    def delete_models(self, headers: Dict[str, str]) -> None:
+        """删除模型"""
+        headers = self._prepare_headers(headers)
+        
+        for data in full_request_list:
+            try:
+                model_name = data["name"]
+                self.logger.info(f'URL: {self.base_url}/delete \ndata={model_name} \nheaders={headers}')
+                res = requests.post(
+                    url=f"{self.base_url}/delete",
+                    json={"name": model_name},
+                    headers=headers,
+                    timeout=3
+                )
+                self.logger.info(f"响应: {res.text}")
+                
+                if res.ok:
+                    res_data = json.loads(res.content)
+                    if res_data["flag"]:
+                        continue
+                    self.logger.error(f"删除模型失败: {res_data['errCode']} - {res_data['errMsg']}")
+                else:
+                    self.logger.error("删除模型时发生错误")
+                    raise Exception("Epaichat服务器错误")
+                    
+            except Exception as e:
+                self.logger.error(f"删除模型时发生错误: {e}")
+                raise
+
+def main():
+    args = parse_argument()
+    logger = Logger()
+    k8s_handler = KubernetesHandler()
+    config_handler = ConfigHandler()
+    
+    # 处理--list-embeddings参数
+    if args.list_embeddings:
+        config_handler.list_available_models()
+        return
+    
+    # 处理headers参数
+    headers = {}
+    for header in args.headers:
+        key, value = header.split(':', 1)
+        headers[key] = value
+    
+    # 获取当前路径
+    current_path = os.path.dirname(os.path.abspath(__file__))
+    
+    # 定义yaml文件路径
+    yaml_files = {
+        'rag_config': os.path.join(current_path, 'rag-config.yaml'),
+        'rag_template': os.path.join(current_path, 'rag-template.yaml'),
+        'vl_config': os.path.join(current_path, 'vl-config.yaml'),
+        'vl_template': os.path.join(current_path, 'vl-template.yaml'),
+        'ollama_config': os.path.join(current_path, 'ollama-config.yaml'),
+        'ollama_template': os.path.join(current_path, 'ollama-template.yaml'),
+        'custom_config': os.path.join(current_path, 'custom-config.yaml'),
+        'custom_template': os.path.join(current_path, 'custom-template.yaml'),
+        'ns': os.path.join(current_path, 'ns.yaml')
+    }
+    
+    # 初始化配置文件
+    config_key = ['rag_config', 'vl_config', 'ollama_config', 'custom_config']
+    config_val = [rag_config_yaml, vl_config_yaml, ollama_config_yaml, custom_config_yaml]
+    for key, val in zip(config_key, config_val):
+        if not os.path.exists(yaml_files[key]):
+            yaml_data = yaml.safe_load(val)
+            with open(yaml_files[key], 'w') as f:
+                yaml.dump(yaml_data, f)
+    
+    # 加载配置
+    if args.union_mode:
+        print("Deploying service with unoin mode.")
+        configs = {
+            'ollama': yaml.safe_load(ollama_config_yaml),
+            'custom': yaml.safe_load(custom_unoin_config_gpu_yaml),
+        }
+    elif args.cpu_mode:
+        print("Deploying service with CPU only.")
+        configs = {
+            'rag': yaml.safe_load(rag_config_yaml),
+            'vl': yaml.safe_load(vl_config_yaml),
+            'ollama': yaml.safe_load(ollama_config_yaml),
+            'custom': yaml.safe_load(custom_config_yaml),
+        }
+    elif args.gpu_mode:
+        print("Deploying service with GPU only.")
+        configs = {
+            'rag': yaml.safe_load(rag_config_gpu_yaml),
+            'vl': yaml.safe_load(vl_config_gpu_yaml),
+            'ollama': yaml.safe_load(ollama_config_gpu_yaml),
+            'custom': yaml.safe_load(custom_config_gpu_yaml),
+        }
+    else:
+        print("Deploying service with custom mode.")
+        configs = {
+            'rag': yaml.safe_load(open(yaml_files['rag_config'])),
+            'vl': yaml.safe_load(open(yaml_files['vl_config'])),
+            'ollama': yaml.safe_load(open(yaml_files['ollama_config'])),
+            'custom': yaml.safe_load(open(yaml_files['custom_config'])),
+        }
+
+    if args.override:
+      for key, val in configs.items():
+          with open(yaml_files[key+"_config"], 'w') as f:
+              yaml.dump(val, f)
+
+    # 准备 request_list
+    vl_use_cpu = False 
+    if configs.get("vl", None) and not configs['vl'].get("num-gpus", None):
+        vl_use_cpu = True
+    
+    # 处理--specify-embeddings参数，筛选embedding模型
+    if args.specify_embeddings:
+        # 筛选模型配置
+        filtered_rags = config_handler.filter_models(param_rags, args.specify_embeddings)
+        filtered_union = config_handler.filter_models(param_union, args.specify_embeddings)
+        
+        # 写入筛选后的配置
+        config_handler.write_config_to_file(filtered_rags, rags_output_path)
+        config_handler.write_config_to_file(filtered_union, union_output_path)
+        
+        logger.info(f"已将筛选后的embedding模型配置写入: {rags_output_path} 和 {union_output_path}")
+        
+        if not args.deploy and not args.delete:
+            print(f"已筛选模型配置并写入文件，未执行部署操作")
+            return
+    
+    # 创建命名空间
+    ns_yaml_data = yaml.safe_load(ns_yaml)
+    with open(yaml_files['ns'], 'w') as f:
+        yaml.dump(ns_yaml_data, f)
+    logger.info("部署命名空间 inais-inference-inner ...")
+    k8s_handler.apply(yaml_files['ns'])
+    
+    # 获取epaichat服务IP
+    epaichat_ip = k8s_handler.get_service_ip("epaichat-service")
+    epai_handler = EpaichatHandler(epaichat_ip, union_mode = args.union_mode, vl_use_cpu = vl_use_cpu)
+    
+    # 处理删除操作
+    if args.delete:
+        logger.info("删除服务...")
+        for key, template in FULL_DEPLOY_DICT.items():
+            k8s_handler.delete(yaml_files[template])
+        epai_handler.delete_models(headers)
+        return
+    
+    # 加载服务yaml
+    services = {
+        'rag': yaml.safe_load(rag_svc_yaml),
+        'vl': yaml.safe_load(vl_cpu_svc_yaml) if vl_use_cpu else yaml.safe_load(vl_gpu_svc_yaml),
+        'ollama': yaml.safe_load(ollama_svc_yaml),
+        'custom': yaml.safe_load(custom_unoin_svc_yaml) if args.union_mode else yaml.safe_load(custom_svc_yaml) 
+    }
+    
+    # 为每个服务创建对应的yaml处理器
+    handlers = {
+        'rag': None if args.union_mode else  ModelYamlHandler(services['rag']),
+        'vl': None if args.union_mode else (ContainerYamlHandler(services['vl']) if vl_use_cpu else ModelYamlHandler(services['vl'])) ,
+        'ollama': ContainerYamlHandler(services['ollama']),
+        'custom': ModelYamlHandler(services['custom'])
+    }
+    
+    # 配置每个服务
+    for svc_name, handler in handlers.items():
+        if not handler:
+            continue
+        config = configs[svc_name]
+        handler.set_node_affinity(config.get("node-affinity"))
+        handler.set_node_selector(config.get("use-any-nodes"))
+        handler.set_replicas(config.get("replicas", 1))
+        handler.set_resources(
+            num_gpus=config.get("num-gpus", None),
+            cpus=config.get("num-cpus", 8),
+            memory=config.get("memory", "16G"),
+            gpu_type=config.get("gpu-type") if config.get("gpu-type", None) else "nvidia.com/gpu"
+        )
+        env: dict = config.get("env", None)
+        if config.get("num-gpus", None):
+            if isinstance(env, dict) and env.get("NVIDIA_VISIBLE_DEVICES"):
+                del(env["NVIDIA_VISIBLE_DEVICES"])
+        handler.update_env_vars(env)
+        
+        # 保存配置到文件
+        template_key = f"{svc_name}_template"
+        with open(yaml_files[template_key], 'w') as f:
+            yaml.dump(handler.data, f)
+    
+    # 部署服务
+    if args.deploy:
+        logger.info("部署服务...")
+        for key,template in (UNION_DEPLOY_DICT.items() if args.union_mode  else DEPLOY_DICT.items()):
+            k8s_handler.apply(yaml_files[template])
+        epai_handler.add_models(headers)
+
+if __name__ == "__main__":
+    main()

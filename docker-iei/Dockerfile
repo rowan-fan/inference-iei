@@ -5,6 +5,7 @@ ADD ./xinference /usr/local/lib/python3.10/dist-packages/xinference
 RUN pip install --upgrade pip \
     && pip install -U "magic-pdf[full]" -i https://mirrors.aliyun.com/pypi/simple \
     && pip uninstall -y magic-pdf \
+    && pip install flask flask_restful \
     && rm -rf /root/.cache/pip
 
 WORKDIR /workspace

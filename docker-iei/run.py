@@ -845,7 +845,8 @@ class ModelProbe:
         self.model_names = model_names
         self.base_url = f"http://0.0.0.0:{port}"
         self.sensitive_url = f"http://0.0.0.0:{os.environ.get('SENSITIVE_SVC_PORT', 39998)}"
-        
+        self.pdf_parser_url = f"http://0.0.0.0:{os.environ.get('pdf_parser_port', 8877)}"
+
     def generate_probe_file(self) -> None:
         """Generate probe check file with all necessary checks"""
         probe_content = self._generate_basic_check()
@@ -943,6 +944,12 @@ if os.environ.get("SENSITIVE_MODEL_ENABLE", "false").lower() == "true":
     resp = requests.get(sensitive_address + "/health", timeout=30)
     if resp.status_code != 200:
         raise Exception("Sensitive word service error")
+
+if os.environ.get("PDF_PARSER_ENABLE", "false").lower() == "true":
+    pdf_parser_address = "{self.pdf_parser_url}"
+    resp = requests.get(pdf_parser_address + "/check", timeout=30)
+    if resp.status_code != 200:
+        raise Exception("PDF parser service error")
 '''
 
 def main():

@@ -264,7 +264,7 @@ class RerankModel:
         assert self._model is not None
         if max_chunks_per_doc is not None:
             raise ValueError("rerank hasn't support `max_chunks_per_doc` parameter.")
-        logger.info("Rerank with kwargs: %s, model: %s", kwargs, self._model)
+        # logger.info("Rerank with kwargs: %s, model: %s", kwargs, self._model)
 
         from .utils import preprocess_sentence
 

@@ -1,0 +1,1304 @@
+#! /usr/bin/python2
+"""
+A client script for deploying and managing RAG (Retrieval-Augmented Generation) services.
+This script handles deployment, configuration and management of various model services
+including embedding models, vision-language models and Ollama models.
+
+Key features:
+- Kubernetes deployment management
+- Model registration with Epaichat service
+- YAML configuration handling
+- Logging and error handling
+
+此脚本已被转换为Python 2兼容版本
+"""
+
+# Python 2 兼容性导入
+from __future__ import print_function
+from __future__ import division
+import os
+import sys
+import yaml
+import argparse
+import subprocess
+import requests
+import json
+import logging
+import functools
+import time
+from datetime import datetime
+
+# Python 2/3 兼容性导入
+try:
+    from typing import Dict, Any, Optional, List, Union
+except ImportError:
+    pass
+
+try:
+    from abc import ABC, abstractmethod
+except ImportError:
+    # Python 2 中没有 ABC 类，使用 ABCMeta
+    from abc import ABCMeta, abstractmethod
+    
+    class ABC(object):
+        __metaclass__ = ABCMeta
+
+# 确保在Python 2中items()方法能正常工作
+try:
+    dict.items
+except AttributeError:
+    # Python 2中使用iteritems()替代items()
+    def items(d):
+        return d.iteritems()
+else:
+    # Python 3中使用items()
+    def items(d):
+        return d.items()
+
+# Python 2/3 字符串兼容性处理
+if sys.version_info[0] >= 3:
+    unicode = str
+
+FULL_DEPLOY_DICT = {
+    'rag': 'rag_template',
+    'vl': 'vl_template',
+    'ollama': 'ollama_template',
+    'custom': 'custom_template',
+}
+
+DEPLOY_DICT = dict(FULL_DEPLOY_DICT)
+
+# Model configurations for registration with Epaichat service
+# The last two must be vl-cpu and vl-gpu models.
+request_list = [
+  {
+  "name":"bce-embedding-base_v1",                             
+  "type":3,            
+  "model_key":"bce-embedding-base_v1",
+  "api_key":"xxxxxxxx", 
+  "access_path":"http://internal-rag-service-predictor-default.inais-inference-inner.svc.cluster.local:8080/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"有道翻译", 
+  "parameter_size":"768维",
+  "expert_fields":["专业领域"],
+  "language":"中英", 
+  "task_type":"embedding",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"bge-large-zh-v1.5",                             
+  "type":3,            
+  "model_key":"bge-large-zh-v1.5",
+  "api_key":"xxxxxxxx", 
+  "access_path":"http://internal-rag-service-predictor-default.inais-inference-inner.svc.cluster.local:8080/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"智源", 
+  "parameter_size":"1024维",
+  "expert_fields":["通用领域"],
+  "language":"中文", 
+  "task_type":"embedding",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"Yuan-embedding-1.0",                             
+  "type":3,            
+  "model_key":"Yuan-embedding-1.0",
+  "api_key":"xxxxxxxx", 
+  "access_path":"http://internal-rag-service-predictor-default.inais-inference-inner.svc.cluster.local:8080/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"浪潮信息", 
+  "parameter_size":"1792维",
+  "expert_fields":["语义搜索"],
+  "language":"中文", 
+  "task_type":"embedding",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"text2vec-base-chinese",                             
+  "type":3,            
+  "model_key":"text2vec-base-chinese",
+  "api_key":"xxxxxxxx", 
+  "access_path":"http://internal-rag-service-predictor-default.inais-inference-inner.svc.cluster.local:8080/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"个人", 
+  "parameter_size":"768维",
+  "expert_fields":["语义搜索"],
+  "language":"中文", 
+  "task_type":"embedding",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"bge-reranker-v2-m3",                             
+  "type":4,            
+  "model_key":"bge-reranker-v2-m3",
+  "api_key":"xxxxxxxx", 
+  "access_path":"http://internal-rag-service-predictor-default.inais-inference-inner.svc.cluster.local:8080/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"智源", 
+  "parameter_size":"1024维",
+  "expert_fields":["通用领域"],
+  "language":"中文", 
+  "task_type":"rerank",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"security-semantic-filtering",                             
+  "type":2,            
+  "model_key":"sensitive_filter",
+  "api_key":"", 
+  "access_path":"http://internal-rag-service-predictor-default.inais-inference-inner.svc.cluster.local:39998/sensitive/evaluate", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"智源", 
+  "parameter_size":"768维",
+  "expert_fields":["通用领域"],
+  "language":"中文", 
+  "task_type":"classification",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"qwen2-vl-instruct",                             
+  "type":5,            
+  "model_key":"qwen2-vl-instruct",
+  "api_key":"", 
+  "access_path":"http://internal-vl-service-predictor-default.inais-inference-inner.svc.cluster.local:8080/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"通义千问", 
+  "parameter_size":"32768维",
+  "expert_fields":["通用领域"],
+  "language":"中文,英文", 
+  "task_type":"vision",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+},{
+  "name":"minicpm-v",                             
+  "type":5,            
+  "model_key":"minicpm-v:8b-2.6-q4_0",
+  "api_key":"ollama", 
+  "access_path":"http://internal-vl-service-predictor-default.inais-inference-inner.svc.cluster.local:11434/v1", 
+  "logo":"xxxxxx",
+  "protocol":"OpenAI",
+  "all_user": False,  
+  "usernames":[],
+  "manufacturer":"OpenBMB", 
+  "parameter_size":"32768维",
+  "expert_fields":["通用领域"],
+  "language":"中文,英文", 
+  "task_type":"vision",
+  "status_message":"Not Ready", 
+  "default_settings":[]
+}
+]
+
+full_request_list = [dict(item) for item in request_list]
+
+# Configuration template for RAG service
+rag_config_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 8
+memory: "32G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+# Configuration template for vision-language service
+vl_config_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 6
+memory: "16G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+# Configuration template for ollama service
+ollama_config_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 6
+memory: "16G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+custom_config_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 8
+memory: "16G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+# Configuration template for RAG service
+rag_config_gpu_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 8
+memory: "32G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+# Configuration template for vision-language service
+vl_config_gpu_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 6
+num-gpus: 1
+gpu-type: metax-tech.com/gpu
+memory: "16G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+# Configuration template for ollama service
+ollama_config_gpu_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 6
+memory: "16G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+custom_config_gpu_yaml = """
+node-affinity: []
+use-any-nodes: "false"
+replicas: 1
+num-cpus: 8
+num-gpus: 1
+memory: "16G"
+env:
+  NVIDIA_VISIBLE_DEVICES: none
+"""
+
+# Namespace configuration template
+ns_yaml = """
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    istio-injection: enabled
+  name: inais-inference-inner
+"""
+
+# YAML template for RAG service deployment
+rag_svc_yaml = """
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    serving.kserve.io/autoscalerClass: hpa
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/isMultiPorts: "false"
+    serving.kserve.io/metric: cpu
+    serving.kserve.io/targetUtilizationPercentage: "90"
+    autoscaling.knative.dev/target: "1"
+    sidecar.istio.io/inject: "true"
+  name: internal-rag-service
+  namespace: inais-inference-inner
+spec:
+  predictor:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: AIS_NODE_AFFINITY
+    nodeSelector:
+      inf_use: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    model:
+      storageUri: hostpath:///mnt/inaisfs/loki/bussiness/embedding-models
+      imagePullPolicy: Always
+      modelFormat:
+        name: llm
+      env:
+        - name: MODEL_CONFIG
+          value: /mnt/inaisfs/loki/bussiness/embedding-models/Param-rags.json
+        - name: SENSITIVE_MODEL_ENABLE
+          value: "true"
+        - name: SENSITIVE_MODEL_PATH
+          value: /mnt/inaisfs/loki/bussiness/embedding-models/Security_semantic_filtering
+      livenessProbe:
+        exec:
+          command:
+          - python3
+          - /workspace/probe.py
+        failureThreshold: 3
+        initialDelaySeconds: 1200
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 180
+      name: kserve-container
+      ports:
+      - containerPort: 8080
+        name: http1
+        protocol: TCP
+      - containerPort: 39998
+        name: http8080
+        protocol: TCP
+      readinessProbe:
+        exec:
+          command:
+          - python3
+          - /workspace/probe.py
+        failureThreshold: 20
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 180
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16G
+        requests:
+          cpu: "8"
+          memory: 16G
+"""
+
+# YAML template for vision-language service deployment
+vl_cpu_svc_yaml = """
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    serving.kserve.io/autoscalerClass: hpa
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/isMultiPorts: "false"
+    serving.kserve.io/metric: cpu
+    serving.kserve.io/targetUtilizationPercentage: "90"
+    autoscaling.knative.dev/target: "1"
+    sidecar.istio.io/inject: "true"
+  name: internal-vl-service
+  namespace: inais-inference-inner
+spec:
+  predictor:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: AIS_NODE_AFFINITY
+    nodeSelector:
+      inf_use: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    containers:
+    - image: 10.130.36.4:5000/inais/ollama:0.5.1-minicpmv-2.6
+      imagePullPolicy: Always
+      name: kserve-container
+      ports:
+      - containerPort: 11434
+        name: http1
+        protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 11434
+        failureThreshold: 2
+        initialDelaySeconds: 60
+        periodSeconds: 20
+        successThreshold: 1
+        timeoutSeconds: 3
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 11434
+        failureThreshold: 5
+        initialDelaySeconds: 30
+        periodSeconds: 20
+        successThreshold: 1
+        timeoutSeconds: 3
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16G
+        requests:
+          cpu: "8"
+          memory: 16G
+"""
+
+# YAML template for vision-language service deployment
+vl_gpu_svc_yaml = """
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    serving.kserve.io/autoscalerClass: hpa
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/isMultiPorts: "false"
+    serving.kserve.io/metric: cpu
+    serving.kserve.io/targetUtilizationPercentage: "90"
+    autoscaling.knative.dev/target: "1"
+    sidecar.istio.io/inject: "true"
+  name: internal-vl-service
+  namespace: inais-inference-inner
+spec:
+  predictor:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: AIS_NODE_AFFINITY
+    nodeSelector:
+      inf_use: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    model:
+      storageUri: hostpath:///mnt/inaisfs/loki/bussiness/vl-models
+      imagePullPolicy: Always
+      modelFormat:
+        name: llm
+      env:
+        - name: MODEL_CONFIG
+          value: /mnt/inaisfs/loki/bussiness/vl-models/Param-vl.json
+        - name: open_acceleration
+          value: "True"
+      ports:
+      - containerPort: 8080
+        name: http1
+        protocol: TCP
+      livenessProbe:
+        exec:
+          command:
+          - python3
+          - /workspace/probe.py
+        failureThreshold: 3
+        initialDelaySeconds: 1200
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 180
+      readinessProbe:
+        exec:
+          command:
+          - python3
+          - /workspace/probe.py
+        failureThreshold: 20
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 180
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16G
+        requests:
+          cpu: "8"
+          memory: 16G
+"""
+
+# YAML template for vision-language service deployment
+vl_svc_yaml = """
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    serving.kserve.io/autoscalerClass: hpa
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/isMultiPorts: "false"
+    serving.kserve.io/metric: cpu
+    serving.kserve.io/targetUtilizationPercentage: "90"
+    autoscaling.knative.dev/target: "1"
+    sidecar.istio.io/inject: "true"
+  name: internal-vl-service
+  namespace: inais-inference-inner
+spec:
+  predictor:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: AIS_NODE_AFFINITY
+    nodeSelector:
+      inf_use: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    model:
+      storageUri: hostpath:///mnt/inaisfs/loki/bussiness/vl-models
+      imagePullPolicy: Always
+      modelFormat:
+        name: llm
+      env:
+        - name: MODEL_CONFIG
+          value: /mnt/inaisfs/loki/bussiness/vl-models/Param-vl.json
+        - name: open_acceleration
+          value: "True"
+      ports:
+      - containerPort: 8080
+        name: http1
+        protocol: TCP
+      livenessProbe:
+        exec:
+          command:
+          - python3
+          - /workspace/probe.py
+        failureThreshold: 3
+        initialDelaySeconds: 1200
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 180
+      readinessProbe:
+        exec:
+          command:
+          - python3
+          - /workspace/probe.py
+        failureThreshold: 20
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 180
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16G
+        requests:
+          cpu: "8"
+          memory: 16G
+"""
+
+
+# YAML template for Ollama service deployment
+ollama_svc_yaml = """
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    serving.kserve.io/autoscalerClass: hpa
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/isMultiPorts: "false"
+    serving.kserve.io/metric: cpu
+    serving.kserve.io/targetUtilizationPercentage: "90"
+    autoscaling.knative.dev/target: "1"
+    sidecar.istio.io/inject: "true"
+  name: internal-ollama-service
+  namespace: inais-inference-inner
+spec:
+  predictor:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: AIS_NODE_AFFINITY
+    nodeSelector:
+      inf_use: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    containers:
+    - image: 10.130.36.4:5000/inais/ollama:0.3.14
+      imagePullPolicy: Always
+      name: kserve-container
+      ports:
+      - containerPort: 11434
+        name: http1
+        protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 11434
+        failureThreshold: 2
+        initialDelaySeconds: 60
+        periodSeconds: 20
+        successThreshold: 1
+        timeoutSeconds: 3
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 11434
+        failureThreshold: 5
+        initialDelaySeconds: 30
+        periodSeconds: 20
+        successThreshold: 1
+        timeoutSeconds: 3
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16G
+        requests:
+          cpu: "8"
+          memory: 16G
+"""
+
+custom_svc_yaml = """
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    serving.kserve.io/autoscalerClass: hpa
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/isMultiPorts: "false"
+    serving.kserve.io/metric: cpu
+    serving.kserve.io/targetUtilizationPercentage: "90"
+    autoscaling.knative.dev/target: "1"
+    sidecar.istio.io/inject: "true"
+  name: internal-custom-service
+  namespace: inais-inference-inner
+spec:
+  predictor:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: AIS_NODE_AFFINITY
+    nodeSelector:
+      inf_use: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    containers:
+    - image: 10.130.36.4:5000/inais/paddle-gpu:v1.8
+      imagePullPolicy: Always
+      command: ["/bin/bash", "-c"]
+      args: [ "bash /root/run.sh & while true; do sleep 1; done" ]
+      env:
+      - name: GPU_INDEX
+        value: "0"
+      - name: OCR_PORT
+        value: "80"
+      - name: TABLE_PORT
+        value: "81"
+      - name: MFR_PORT
+        value: "82"
+      - name: MFD_PORT
+        value: "83"
+      - name: LAYOUT_PORT
+        value: "84"
+      - name: MODEL_PATH
+        value: "/mnt/models/"
+      name: kserve-container
+      ports:
+      - containerPort: 80
+        name: http1
+        protocol: TCP
+      - containerPort: 81
+        name: http81
+        protocol: TCP
+      - containerPort: 82
+        name: http82
+        protocol: TCP
+      - containerPort: 83
+        name: http83
+        protocol: TCP
+      - containerPort: 84
+        name: http84
+        protocol: TCP
+      livenessProbe:
+        exec:
+          command:
+          - python3
+          - /root/check_server.py 
+        failureThreshold: 3
+        initialDelaySeconds: 120
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 30
+      readinessProbe:
+        exec:
+          command:
+          - python3
+          - /root/check_server.py 
+        failureThreshold: 5
+        initialDelaySeconds: 120
+        periodSeconds: 60
+        successThreshold: 1
+        timeoutSeconds: 30
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16G
+        requests:
+          cpu: "8"
+          memory: 16G
+      volumeMounts:
+      - mountPath: /mnt/models
+        name: custom-storage
+    volumes:
+    - name: custom-storage
+      hostPath:
+        path: /mnt/inaisfs/loki/bussiness/custom-models/
+        type: Directory
+"""
+
+class YamlHandler(ABC):
+    """Base class for YAML configuration handling"""
+    def __init__(self, yaml_data):
+        self.data = yaml_data
+        self.logger = Logger()
+
+    @abstractmethod
+    def set_node_affinity(self, node_affinity):
+        """Set node affinity for the service"""
+        pass
+
+    @abstractmethod 
+    def set_node_selector(self, use_any_nodes):
+        """Configure node selector settings"""
+        pass
+
+    @abstractmethod
+    def set_replicas(self, replicas):
+        """Set number of service replicas"""
+        pass
+
+    @abstractmethod
+    def set_resources(self, num_gpus=None, cpus=None, memory=None, gpu_type="nvidia.com/gpu"):
+        """Configure compute resources for the service"""
+        pass
+
+    @abstractmethod
+    def update_env_vars(self, env_vars):
+        """Update environment variables for the service"""
+        pass
+
+    def set_annotations(self, raw_deployment=True, auto_scaler="hpa", target_cpu="90"):
+        """Set Kubernetes annotations for the service"""
+        annotations = {
+            "serving.kserve.io/autoscalerClass": auto_scaler,
+            "serving.kserve.io/metric": "cpu", 
+            "serving.kserve.io/targetUtilizationPercentage": target_cpu,
+            "sidecar.istio.io/inject": "true"
+        }
+        if raw_deployment:
+            annotations["serving.kserve.io/deploymentMode"] = "RawDeployment"
+            
+        self.data["metadata"]["annotations"].update(annotations)
+
+class ModelYamlHandler(YamlHandler):
+    """Handler for YAML configurations using model field"""
+    def set_node_affinity(self, node_affinity):
+        """Set node affinity for model-based services"""
+        self.logger.info("Setting node affinity to {0}".format(node_affinity))
+        if node_affinity:
+            self.data['spec']['predictor']['affinity'] = {
+                'nodeAffinity': {
+                    'preferredDuringSchedulingIgnoredDuringExecution': [{
+                        'weight': 100,
+                        'preference': {
+                            'matchExpressions': [{
+                                'key': 'kubernetes.io/hostname',
+                                'operator': 'In',
+                                'values': node_affinity
+                            }]
+                        }
+                    }]
+                }
+            }
+        else:
+            if 'affinity' in self.data['spec']['predictor']:
+                del self.data['spec']['predictor']['affinity']
+
+    def set_node_selector(self, use_any_nodes):
+        """Configure node selector for model-based services"""
+        if use_any_nodes == "true":
+            del self.data['spec']['predictor']['nodeSelector']
+
+    def set_replicas(self, replicas):
+        """Set replica count for model-based services"""
+        self.logger.info("Setting replica count to {0}".format(replicas))
+        self.data["metadata"]["annotations"]["autoscaling.knative.dev/target"] = "{0}".format(replicas)
+        self.data["spec"]["predictor"]["maxReplicas"] = replicas
+        self.data["spec"]["predictor"]["minReplicas"] = replicas
+
+    def set_resources(self, num_gpus=None, cpus=None, memory=None, gpu_type="nvidia.com/gpu"):
+        """Configure compute resources for model-based services"""
+        if num_gpus is not None:
+            self.logger.info("Setting GPU count to {0}: {1}".format(gpu_type, num_gpus))
+            self.data['spec']['predictor']['model']['resources']['limits'][gpu_type] = num_gpus
+            self.data['spec']['predictor']['model']['resources']['requests'][gpu_type] = num_gpus
+        
+        if gpu_type == "nvidia.com/gpu":
+            self.logger.info("Setting GPU type to llmserver")
+            self.data['spec']['predictor']['model']['runtime'] = 'llmserver'
+        else:
+            self.logger.info("Setting GPU type to llmserver-mx")
+            self.data['spec']['predictor']['model']['runtime'] = 'llmserver-mx'
+        
+        if cpus is not None:
+            self.logger.info("Setting CPU count to {0}".format(cpus))
+            self.data['spec']['predictor']['model']['resources']['limits']['cpu'] = cpus
+            self.data['spec']['predictor']['model']['resources']['requests']['cpu'] = cpus
+            
+        if memory is not None:
+            self.logger.info("Setting memory to {0}".format(memory))
+            self.data['spec']['predictor']['model']['resources']['limits']['memory'] = memory
+            self.data['spec']['predictor']['model']['resources']['requests']['memory'] = memory
+
+    def update_env_vars(self, env_vars):
+        """Update environment variables for model-based services"""
+        self.logger.info("Setting environment variables to {0}".format(env_vars))
+        env_list = self.data['spec']['predictor']['model']['env']
+        # 将字典推导式改为普通循环，兼容Python 2
+        env_dict = {}
+        for env in env_list:
+            env_dict[env['name']] = env['value']
+        
+        if isinstance(env_dict, dict) and isinstance(env_vars, dict):
+            env_dict.update(env_vars)
+        
+        # 将列表推导式改为普通循环，兼容Python 2
+        new_env_list = []
+        for k, v in items(env_dict):
+            new_env_list.append({'name': k, 'value': v})
+        self.data['spec']['predictor']['model']['env'] = new_env_list
+
+class ContainerYamlHandler(YamlHandler):
+    """Handler for YAML configurations using containers field"""
+    def set_node_affinity(self, node_affinity):
+        """Set node affinity for container-based services"""
+        self.logger.info("Setting node affinity to {0}".format(node_affinity))
+        if node_affinity:
+            self.data['spec']['predictor']['affinity'] = {
+                'nodeAffinity': {
+                    'preferredDuringSchedulingIgnoredDuringExecution': [{
+                        'weight': 100,
+                        'preference': {
+                            'matchExpressions': [{
+                                'key': 'kubernetes.io/hostname',
+                                'operator': 'In',
+                                'values': node_affinity
+                            }]
+                        }
+                    }]
+                }
+            }
+        else:
+            if 'affinity' in self.data['spec']['predictor']:
+                del self.data['spec']['predictor']['affinity']
+
+    def set_node_selector(self, use_any_nodes):
+        """Configure node selector for container-based services"""
+        if use_any_nodes == "true":
+            del self.data['spec']['predictor']['nodeSelector']
+
+    def set_replicas(self, replicas):
+        """Set replica count for container-based services"""
+        self.logger.info("Setting replica count to {0}".format(replicas))
+        self.data["metadata"]["annotations"]["autoscaling.knative.dev/target"] = "{0}".format(replicas)
+        self.data["spec"]["predictor"]["maxReplicas"] = replicas
+        self.data["spec"]["predictor"]["minReplicas"] = replicas
+
+    def set_resources(self, num_gpus=None, cpus=None, memory=None, gpu_type="nvidia.com/gpu"):
+        """Configure compute resources for container-based services"""
+        if num_gpus is not None:
+            self.logger.info("Setting GPU count to {0}".format(num_gpus))
+            self.data['spec']['predictor']['containers'][0]['resources']['limits'][gpu_type] = num_gpus
+            self.data['spec']['predictor']['containers'][0]['resources']['requests'][gpu_type] = num_gpus
+        
+        if cpus is not None:
+            self.logger.info("Setting CPU count to {0}".format(cpus))
+            self.data['spec']['predictor']['containers'][0]['resources']['limits']['cpu'] = cpus
+            self.data['spec']['predictor']['containers'][0]['resources']['requests']['cpu'] = cpus
+            
+        if memory is not None:
+            self.logger.info("Setting memory to {0}".format(memory))
+            self.data['spec']['predictor']['containers'][0]['resources']['limits']['memory'] = memory
+            self.data['spec']['predictor']['containers'][0]['resources']['requests']['memory'] = memory
+
+    def update_env_vars(self, env_vars):
+        """Update environment variables for container-based services"""
+        self.logger.info("Setting environment variables to {0}".format(env_vars))
+        env_list = self.data['spec']['predictor']['containers'][0].get('env', [])
+        # 将字典推导式改为普通循环，兼容Python 2
+        env_dict = {}
+        for env in env_list:
+            env_dict[env['name']] = env['value']
+        
+        if isinstance(env_dict, dict) and isinstance(env_vars, dict):
+            env_dict.update(env_vars)
+        
+        # 将列表推导式改为普通循环，兼容Python 2
+        new_env_list = []
+        for k, v in items(env_dict):
+            new_env_list.append({'name': k, 'value': v})
+        self.data['spec']['predictor']['containers'][0]['env'] = new_env_list
+
+# Python 2中元类的定义方式不同
+class Singleton(type):
+    """Metaclass for implementing the Singleton pattern"""
+    _instances = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+# Python 2和Python 3中的类定义不同
+class Logger(object):
+    """Singleton logger class for centralized logging"""
+    __metaclass__ = Singleton
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self._setup_logger()
+        
+    def _setup_logger(self):
+        """Configure logging settings"""
+        logging.basicConfig(level=logging.INFO,
+                          format='[%(asctime)s][%(filename)s:%(lineno)d] %(levelname)s %(message)s',
+                          datefmt='%Y-%m-%d %H:%M:%S')
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        if not os.path.exists(log_dir):
+            os.mkdir(log_dir)
+        log_file = os.path.join(log_dir, "log_{0}.log".format(datetime.now().strftime('%Y-%m-%d-%H-%M-%S')))
+        self.logger.addHandler(logging.FileHandler(log_file))
+    
+    def info(self, msg): self.logger.info(msg)
+    def error(self, msg): self.logger.error(msg)
+
+def parse_argument():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description="Deploy embedding models")
+    parser.add_argument('--headers', type=str, nargs='*', help="Headers in the format KEY:VALUE", default=dict())
+    parser.add_argument('--deploy', action='store_true', help="Deploy the service after modify the YAML")
+    parser.add_argument('--delete', action="store_true", help="Delete the deployed service")
+    parser.add_argument('--cpu-mode', action="store_true", help="Override config file and deploy service with CPU only")
+    parser.add_argument('--gpu-mode', action="store_true", help="Override config file and deploy service with GPU only")
+    parser.add_argument('--override', action="store_true", help="Override config file with current config")
+    args =  parser.parse_args()
+    return args
+
+def retry(retries = 30, delay=10, enable_retry = True):
+    """Decorator for implementing retry logic"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception, e:
+                    if not enable_retry:
+                        raise
+                    attempt += 1
+                    if attempt >= retries:
+                        raise
+                    logging.error("[{0}] Operation failed with error: {1}. Retrying in {2} seconds... (Attempt {3})".format(
+                        datetime.now().strftime('%Y-%m-%d-%H-%M-%S'), e, delay, attempt))
+                    time.sleep(delay)
+        return wrapper
+    return decorator
+
+# 添加Python 2 subprocess兼容函数
+def call_subprocess_compat(cmd):
+    """Python 2兼容的subprocess调用"""
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    return process.returncode, stdout, stderr
+
+class KubernetesHandler:
+    """Handler for Kubernetes operations"""
+    def __init__(self):
+        self.logger = Logger()
+
+    def apply(self, yaml_file):
+        """Apply Kubernetes configuration from YAML file"""
+        # 替换subprocess.run为Python 2兼容的方式
+        returncode, stdout, stderr = call_subprocess_compat(["kubectl", "apply", "-f", yaml_file])
+        if returncode == 0:
+            self.logger.info("Successfully deployed configuration")
+        else:
+            self.logger.error("Failed to deploy configuration: {0}".format(stderr))
+            
+    def delete(self, yaml_file):
+        """Delete Kubernetes resources defined in YAML file"""
+        # 替换subprocess.run为Python 2兼容的方式
+        returncode, stdout, stderr = call_subprocess_compat(["kubectl", "delete", "-f", yaml_file])
+        if returncode == 0:
+            self.logger.info("Successfully deleted resources")
+        elif "NotFound" in str(stderr):
+            self.logger.info("Resources already deleted")
+        else:
+            self.logger.error("Failed to delete resources: {0}".format(stderr))
+
+    @retry(enable_retry = '--headers' not in sys.argv)
+    def get_service_ip(self, service_name, namespace="default"):
+        """Get cluster IP address for a Kubernetes service"""
+        cmd = ["kubectl", "get", "service", service_name, "-n", namespace, "-o", "json"]
+        try:
+            # Python 2 兼容的subprocess调用
+            returncode, stdout, stderr = call_subprocess_compat(cmd)
+            if returncode != 0:
+                raise Exception(stderr)
+            service_info = json.loads(stdout)
+            cluster_ip = service_info['spec']['clusterIP']
+            return cluster_ip
+        except Exception, e:
+            self.logger.error("Failed to get cluster IP for service {0}: {1}".format(service_name, e))
+            raise e
+
+class EpaichatHandler:
+    """Handler for Epaichat API operations"""
+    def __init__(self, epai_ip, epai_port=5051):
+        self.logger = Logger()
+        self.epai_ip = epai_ip
+        self.epai_port = epai_port
+        self.base_url = "http://{0}:{1}/v1.0/models".format(epai_ip, epai_port)
+        
+    def _prepare_headers(self, headers):
+        """准备请求头"""
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = "AIStation"
+        return headers
+
+    @retry(enable_retry = '--headers' not in sys.argv)
+    def add_models(self, headers):
+        """添加模型"""
+        headers = self._prepare_headers(headers)
+        
+        for data in request_list:
+            try:
+                self.logger.info('URL: {0}/add \ndata={1} \nheaders={2}'.format(self.base_url, data, headers))
+                res = requests.post(
+                    url="{0}/add".format(self.base_url),
+                    json=data,
+                    headers=headers,
+                    timeout=3
+                )
+                self.logger.info("响应: {0}".format(res.text))
+                
+                if res.ok:
+                    res_data = json.loads(res.content)
+                    if res_data["flag"]:
+                        continue
+                    self.logger.error("添加模型失败: {0} - {1}".format(res_data['errCode'], res_data['errMsg']))
+                else:
+                    self.logger.error("添加模型时发生错误")
+                    raise Exception("Epaichat服务器错误")
+                    
+            except Exception, e:
+                self.logger.error("添加模型时发生错误: {0}".format(e))
+                raise
+
+    @retry(enable_retry = '--headers' not in sys.argv)
+    def delete_models(self, headers):
+        """删除模型"""
+        headers = self._prepare_headers(headers)
+        
+        for data in full_request_list:
+            try:
+                model_name = data["name"]
+                self.logger.info('URL: {0}/delete \ndata={1} \nheaders={2}'.format(self.base_url, model_name, headers))
+                res = requests.post(
+                    url="{0}/delete".format(self.base_url),
+                    json={"name": model_name},
+                    headers=headers,
+                    timeout=3
+                )
+                self.logger.info("响应: {0}".format(res.text))
+                
+                if res.ok:
+                    res_data = json.loads(res.content)
+                    if res_data["flag"]:
+                        continue
+                    self.logger.error("删除模型失败: {0} - {1}".format(res_data['errCode'], res_data['errMsg']))
+                else:
+                    self.logger.error("删除模型时发生错误")
+                    raise Exception("Epaichat服务器错误")
+                    
+            except Exception, e:
+                self.logger.error("删除模型时发生错误: {0}".format(e))
+                raise
+
+def main():
+    args = parse_argument()
+    logger = Logger()
+    k8s_handler = KubernetesHandler()
+    
+    # 处理headers参数
+    headers = {}
+    for header in args.headers:
+        key, value = header.split(':', 1)
+        headers[key] = value
+    
+    # 获取当前路径
+    current_path = os.path.dirname(os.path.abspath(__file__))
+    
+    # 定义yaml文件路径
+    yaml_files = {
+        'rag_config': os.path.join(current_path, 'rag-config.yaml'),
+        'rag_template': os.path.join(current_path, 'rag-template.yaml'),
+        'vl_config': os.path.join(current_path, 'vl-config.yaml'),
+        'vl_template': os.path.join(current_path, 'vl-template.yaml'),
+        'ollama_config': os.path.join(current_path, 'ollama-config.yaml'),
+        'ollama_template': os.path.join(current_path, 'ollama-template.yaml'),
+        'custom_config': os.path.join(current_path, 'custom-config.yaml'),
+        'custom_template': os.path.join(current_path, 'custom-template.yaml'),
+        'ns': os.path.join(current_path, 'ns.yaml')
+    }
+    
+    # 初始化配置文件
+    config_key = ['rag_config', 'vl_config', 'ollama_config', 'custom_config']
+    config_val = [rag_config_yaml, vl_config_yaml, ollama_config_yaml, custom_config_yaml]
+    for key, val in zip(config_key, config_val):
+        if not os.path.exists(yaml_files[key]):
+            yaml_data = yaml.safe_load(val)
+            with open(yaml_files[key], 'w') as f:
+                yaml.dump(yaml_data, f)
+    
+    # 加载配置
+    if args.cpu_mode:
+        print("Deploying service with CPU only.")
+        configs = {
+            'rag': yaml.safe_load(rag_config_yaml),
+            'vl': yaml.safe_load(vl_config_yaml),
+            'ollama': yaml.safe_load(ollama_config_yaml),
+            'custom': yaml.safe_load(custom_config_yaml),
+        }
+    elif args.gpu_mode:
+        print("Deploying service with GPU only.")
+        configs = {
+            'rag': yaml.safe_load(rag_config_gpu_yaml),
+            'vl': yaml.safe_load(vl_config_gpu_yaml),
+            'ollama': yaml.safe_load(ollama_config_gpu_yaml),
+            'custom': yaml.safe_load(custom_config_gpu_yaml),
+        }
+    else:
+        print("Deploying service with custom mode.")
+        configs = {}
+        # Python 2中需要显式编码处理
+        for key in ['rag', 'vl', 'ollama', 'custom']:
+            with open(yaml_files[key+'_config']) as f:
+                configs[key] = yaml.safe_load(f)
+
+    if args.override:
+        # 使用items函数代替dict.items()
+        for key, val in items(configs):
+            with open(yaml_files[key+"_config"], 'w') as f:
+                yaml.dump(val, f)
+
+    # 准备 request_list
+    vl_use_cpu = True
+    if configs['vl'].get("num-gpus", None):
+        vl_use_cpu = False 
+        del request_list[-1]
+    else:
+        del request_list[-2]
+      
+    custom_use_cpu = True
+    if configs['custom'].get("num-gpus", None):
+        custom_use_cpu = False
+    else:
+        del DEPLOY_DICT['custom']
+    
+    # 创建命名空间
+    ns_yaml_data = yaml.safe_load(ns_yaml)
+    with open(yaml_files['ns'], 'w') as f:
+        yaml.dump(ns_yaml_data, f)
+    logger.info("部署命名空间 inais-inference-inner ...")
+    k8s_handler.apply(yaml_files['ns'])
+    
+    # 获取epaichat服务IP
+    epaichat_ip = k8s_handler.get_service_ip("epaichat-service")
+    epai_handler = EpaichatHandler(epaichat_ip)
+    
+    # 处理删除操作
+    if args.delete:
+        logger.info("删除服务...")
+        # 使用items函数代替dict.items()
+        for key, template in items(FULL_DEPLOY_DICT):
+            k8s_handler.delete(yaml_files[template])
+        epai_handler.delete_models(headers)
+        return
+    
+    # 加载服务yaml
+    services = {
+        'rag': yaml.safe_load(rag_svc_yaml),
+        'vl': yaml.safe_load(vl_cpu_svc_yaml) if vl_use_cpu else yaml.safe_load(vl_gpu_svc_yaml),
+        'ollama': yaml.safe_load(ollama_svc_yaml),
+        'custom': yaml.safe_load(custom_svc_yaml)
+    }
+    
+    # 为每个服务创建对应的yaml处理器
+    handlers = {
+        'rag': ModelYamlHandler(services['rag']),
+        'vl': ContainerYamlHandler(services['vl']) if vl_use_cpu else ModelYamlHandler(services['vl']),
+        'ollama': ContainerYamlHandler(services['ollama']),
+        'custom': None
+    }
+    
+    # 配置每个服务
+    # 使用items函数代替dict.items()
+    for svc_name, handler in items(handlers):
+        if not handler:
+            continue
+        config = configs[svc_name]
+        handler.set_node_affinity(config.get("node-affinity"))
+        handler.set_node_selector(config.get("use-any-nodes"))
+        handler.set_replicas(config.get("replicas", 1))
+        handler.set_resources(
+            num_gpus=config.get("num-gpus", None),
+            cpus=config.get("num-cpus", 8),
+            memory=config.get("memory", "16G"),
+            gpu_type=config.get("gpu-type") if config.get("gpu-type", None) else "nvidia.com/gpu"
+        )
+        env = config.get("env", None)
+        if config.get("num-gpus", None):
+            if isinstance(env, dict) and env.get("NVIDIA_VISIBLE_DEVICES"):
+                del(env["NVIDIA_VISIBLE_DEVICES"])
+        handler.update_env_vars(env)
+        
+        # 保存配置到文件
+        template_key = "{0}_template".format(svc_name)
+        with open(yaml_files[template_key], 'w') as f:
+            yaml.dump(handler.data, f)
+    
+    # 部署服务
+    if args.deploy:
+        logger.info("部署服务...")
+        # 使用items函数代替dict.items()
+        for key, template in items(DEPLOY_DICT):
+            k8s_handler.apply(yaml_files[template])
+        epai_handler.add_models(headers)
+
+if __name__ == "__main__":
+    main()
