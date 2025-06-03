@@ -166,8 +166,10 @@ for item in request_list:
     model = dict(item)
     if model.get("api_key") == "ollama":
         model["access_path"] = model["access_path"].format(ollama_svc_host)
+    elif model.get("type") in [5]:  # vl 类型
+        model["access_path"] = model["access_path"].format(vl_svc_host)
     else:
-        model["access_path"] = model["access_path"].format(custom_svc_host)
+        model["access_path"] = model["access_path"].format(rag_svc_host)
     separate_request_list.append(model)
 
 
