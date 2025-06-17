@@ -857,7 +857,7 @@ class RESTfulAPI(CancelMixin):
             ),
         )
         self._router.add_api_route(
-            "/iei/probe",
+            "/inner/probe",
             self.probe,
             methods=["GET"],
         )

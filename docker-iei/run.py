@@ -756,7 +756,7 @@ class ModelLauncher:
         # Base parameters
         launch_params = {
             "model_name": self.args.model_name or model_config.get("modelName"),
-            "model_uid": model_config.get("modelUid") or self.args.model_uid or os.environ.get("MODEL_UID") or os.environ.get("MODEL_ID") or model_config["modelName"],
+            "model_uid": self.args.model_uid or os.environ.get("MODEL_UID") or os.environ.get("MODEL_ID") or model_config.get("modelUid") or model_config["modelName"],
             "model_type": self.args.model_type or model_type,
             "n_gpu": n_gpu,
             "gpu_idx": gpu_idx,
