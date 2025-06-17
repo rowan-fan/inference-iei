@@ -271,7 +271,7 @@ done
 # Step 5: Check if the sensitive model service should be started and start it if enabled
 if [ "${SENSITIVE_MODEL_ENABLE:-false}" = true ]; then
   echo "Starting sensitive service"
-  python3 sensitive_server/sensitive_models_filtering_api.py --port "${SENSITIVE_SVC_PORT:-39998}" --model_path "${SENSITIVE_MODEL_PATH:-/mnt/inaisfs/loki/bussiness/embedding-models/Security_semantic_filtering}" 2>&1 | while IFS= read -r line; do
+  python3 sensitive_server/sensitive_models_filtering_api.py --port "${SENSITIVE_SVC_PORT:-39998}" --model_path "${SENSITIVE_MODEL_PATH:-/mnt/inaisfs/loki/bussiness/embedding-models/Security_semantic_filtering}"  2>&1 | while IFS= read -r line; do
     echo "[SENSITIVE] $line"
   done &
 fi
@@ -279,7 +279,7 @@ fi
 # Step 6: Check if the PDF parser service should be started and start it if enabled
 if [ "${PDF_PARSER_ENABLE:-false}" = true ]; then
   echo "Starting PDF parser service"
-  python3 epaipdfparser/batch_analyze.py --port "${pdf_parser_port:-8877}" --device-type "${pdf_parser_device:-gpu}" --model-path "${pdf_parser_model_path:-/mnt/inaisfs/loki/bussiness/custom-models}" 2>&1 | while IFS= read -r line; do
+  python3 epaipdfparser/batch_analyze.py --port "${pdf_parser_port:-8877}" --device-type "${pdf_parser_device:-gpu}" --model-path "${pdf_parser_model_path:-/mnt/inaisfs/loki/bussiness/custom-models}"  2>&1 | while IFS= read -r line; do
     echo "[PDF_PARSER] $line"
   done &
 fi

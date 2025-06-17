@@ -1,0 +1,8 @@
+FROM inais/llm-serving:8.0-union-base
+
+ADD ./xinference /usr/local/lib/python3.10/dist-packages/xinference
+ADD docker-iei/run.py /workspace/run.py
+ADD docker-iei/start.sh /workspace/start.sh
+ADD docker-iei/epaipdfparser /workspace/epaipdfparser
+
+
