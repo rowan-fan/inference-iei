@@ -29,18 +29,18 @@ graph TD
     end
 
     subgraph "iChat 网关层 (Gateway)"
-        Gateway[iChat Gateway<br>端口: 4000]
+        Gateway["iChat Gateway<br>端口: 4000"]
         LogCollector[日志收集器]
         Registry[服务注册中心]
     end
 
     subgraph "iChat 工作节点层 (Workers)"
-        Worker1[Worker 1 (serve.py)<br>模型: Model-A / Backend: vLLM<br>GPU 0 / 端口: 8001]
-        Worker2[Worker 2 (serve.py)<br>模型: Model-B / Backend: vLLM<br>GPU 1,2 (TP=2) / 端口: 8002]
-        WorkerN[Worker N (serve.py)<br>模型: Model-C / Backend: SGLang<br>GPU 3 / 端口: 8003]
+        Worker1["Worker 1 (serve.py)<br>模型: Model-A / Backend: vLLM<br>GPU 0 / 端口: 8001"]
+        Worker2["Worker 2 (serve.py)<br>模型: Model-B / Backend: vLLM<br>GPU 1,2 (TP=2) / 端口: 8002"]
+        WorkerN["Worker N (serve.py)<br>模型: Model-C / Backend: SGLang<br>GPU 3 / 端口: 8003"]
     end
     
-    Client --> |HTTP/S 请求<br>/v1/chat/completions<br>model: 'model-a'| Gateway
+    Client --> |"HTTP/S 请求<br>/v1/chat/completions<br>model: 'model-a'"| Gateway
     Gateway -- "路由到 Worker 1" --> Worker1
     Gateway -- "路由到 Worker 2" --> Worker2
     Gateway -- "路由到 Worker N" --> WorkerN
