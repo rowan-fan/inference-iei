@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 docker-iei/vllm
 docker-iei/sglang
+docker-iei/epaipdfparser
 
 # C extensions
 *.so
