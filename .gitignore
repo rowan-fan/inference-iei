@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+docker-iei/vllm
+docker-iei/sglang
 
 # C extensions
 *.so
