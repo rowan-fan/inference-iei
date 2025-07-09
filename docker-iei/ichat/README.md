@@ -224,6 +224,101 @@ curl http://localhost:4000/v1/chat/completions \
 
 Gateway会根据请求中的`model`字段，查询其服务注册表（包含所有自动管理的和动态注册的路由），然后将请求路由到相应的Worker。
 
+## API 规范
+
+iChat 的 API 分为两层：**Gateway API** 和 **Worker API**。客户端和管理员与 Gateway 交互，Gateway 与 Worker 交互。
+
+```
++----------+      +------------------+      +---------------+
+|          |----->|                  |----->|               |
+|  Client  |      |  iChat Gateway   |      |  iChat Worker |
+|          |<-----|                  |<-----|               |
++----------+      +------------------+      +---------------+
+     ^                     ^
+     |                     |
+     +------(Admin)--------+
+```
+
+### 1. iChat Worker API (`serve.py`)
+
+Worker 是实际的模型服务实例，其 API 主要由 Gateway 调用。
+
+#### a. 数据平面 API (OpenAI 标准兼容)
+
+Worker 包装了底层推理引擎（如 vLLM, SGLang），并向上层（Gateway）暴露标准的 OpenAI API 接口。
+
+- `POST /v1/chat/completions`: 接收聊天补全请求。Gateway 会将客户端的请求直接转发至此。
+- `POST /v1/completions`: 接收文本补全请求（传统接口）。
+- `POST /v1/embeddings`: 接收文本嵌入请求。
+- `GET /v1/models`: 返回此 Worker 加载的模型的详细信息。
+
+#### b. 控制平面 API
+
+这些接口供 Gateway 用于监控和管理 Worker。
+
+- `GET /health`
+  - **功能**: 健康检查接口。Gateway 使用此接口进行存活性和就绪性探测，确保 Worker 可以接收流量。
+  - **响应**: `{"status": "ok"}`
+- `GET /metrics`
+  - **功能**: 暴露 Prometheus 格式的性能指标。可用于监控推理延迟、吞吐量、GPU 使用率等。
+- `GET /logs/stream`
+  - **功能**: 通过 Server-Sent Events (SSE) 向上游（Gateway）提供实时日志流。Gateway 连接此端点以实现集中式日志收集。
+
+### 2. iChat Gateway API
+
+Gateway 是整个系统的统一入口，为客户端和管理员提供服务。
+
+#### a. 数据平面 API (OpenAI 兼容)
+
+Gateway 聚合了所有 Worker 的能力，并提供一个统一的 OpenAI 兼容入口。
+
+- `POST /v1/chat/completions`: 接收客户端的聊天补全请求，并根据 `model` 字段路由到合适的 Worker。
+- `POST /v1/completions`: (传统接口) 接收文本补全请求并路由。
+- `POST /v1/embeddings`: 接收文本嵌入请求并路由。
+- `GET /v1/models`: 聚合所有已注册的、健康的 Worker 的模型信息，并返回一个统一的模型列表。
+- `GET /v1/models/{model_name}`: 获取特定模型的详细信息。
+
+#### b. 控制平面 API
+
+控制平面 API 分为两部分：供 Worker 注册的内部接口和供管理员使用的管理接口。
+
+##### i. Worker-Gateway 交互接口
+
+这些接口由 Worker 主动调用，用于服务发现和状态上报。
+
+- `POST /v1/workers/heartbeat`
+  - **功能**: Worker 启动后，定期向 Gateway 发送心跳。此接口同时处理 **首次注册** 和 **后续心跳**。
+  - **模式**: 采用 "upsert" 逻辑。如果 `worker_id` 首次出现，则视为注册；如果已存在，则更新其状态。
+  - **请求体**: 包含 Worker 的完整元数据，如 `worker_id` (由 Worker 自行生成), `model_name`, `backend`, `host`, `port`, `model_path` 等。
+  - **设计理念**: 简化 Worker 实现，无需区分注册和心跳流程。
+
+- `GET /v1/logs/stream/{worker_id}`
+  - **功能**: Worker 通过 SSE (Server-Sent Events) 将日志实时流式传输到 Gateway，以实现集中式日志管理。
+
+##### ii. 管理员接口
+
+这些接口用于监控和管理整个 iChat 集群。
+
+- `GET /v1/admin/workers`
+  - **功能**: 列出所有已注册的 Worker（包括由 Gateway 管理的和动态注册的），并显示其状态（如 `healthy`, `unhealthy`）、模型、地址等信息。
+
+- `GET /v1/admin/workers/{worker_id}`
+  - **功能**: 获取指定 Worker 的详细信息，包括元数据和健康状态。
+
+- `POST /v1/admin/workers/launch`
+  - **功能**: 动态启动一个新的 Worker 进程。此功能适用于通过 Gateway 按需扩展 Worker 的场景。
+  - **请求体**: 包含启动 Worker 所需的完整配置，如 `model_name`, `model_path`, `backend`, `host`, `port`, `gpu_ids`, `heartbeat_interval` 等。
+
+- `DELETE /v1/admin/workers/{worker_id}`
+  - **功能**: 停止并移除一个由 Gateway 启动的 Worker 实例。
+
+- `GET /v1/admin/cluster/status`
+  - **功能**: 获取整个 iChat 集群的总体状态，包括 Gateway 状态、资源使用情况和已注册 Worker 概览。
+
+- `GET /v1/admin/cluster/version`
+  - **功能**: 获取 iChat Gateway 的版本信息。
+
+
 ## Worker (`serve.py`) 参数详解
 
 `serve.py` 封装了 `vLLM` 的推理服务。除了 `iChat` 的特定参数外，它还支持所有 `vLLM` OpenAI API 服务的启动参数。
@@ -606,99 +701,6 @@ Gateway会根据请求中的`model`字段，查询其服务注册表（包含所
 | `--ngram-prompt-lookup-max`| | n-gram 提示查找的最大 n-gram 大小。 | `None` |
 | `--model-loader-extra-config`| | 模型加载器的额外配置。 | `None` |
 
-## API 规范
-
-iChat 的 API 分为两层：**Gateway API** 和 **Worker API**。客户端和管理员与 Gateway 交互，Gateway 与 Worker 交互。
-
-```
-+----------+      +------------------+      +---------------+
-|          |----->|                  |----->|               |
-|  Client  |      |  iChat Gateway   |      |  iChat Worker |
-|          |<-----|                  |<-----|               |
-+----------+      +------------------+      +---------------+
-     ^                     ^
-     |                     |
-     +------(Admin)--------+
-```
-
-### 1. iChat Worker API (`serve.py`)
-
-Worker 是实际的模型服务实例，其 API 主要由 Gateway 调用。
-
-#### a. 数据平面 API (OpenAI 标准兼容)
-
-Worker 包装了底层推理引擎（如 vLLM, SGLang），并向上层（Gateway）暴露标准的 OpenAI API 接口。
-
-- `POST /v1/chat/completions`: 接收聊天补全请求。Gateway 会将客户端的请求直接转发至此。
-- `POST /v1/completions`: 接收文本补全请求（传统接口）。
-- `POST /v1/embeddings`: 接收文本嵌入请求。
-- `GET /v1/models`: 返回此 Worker 加载的模型的详细信息。
-
-#### b. 控制平面 API
-
-这些接口供 Gateway 用于监控和管理 Worker。
-
-- `GET /health`
-  - **功能**: 健康检查接口。Gateway 使用此接口进行存活性和就绪性探测，确保 Worker 可以接收流量。
-  - **响应**: `{"status": "ok"}`
-- `GET /metrics`
-  - **功能**: 暴露 Prometheus 格式的性能指标。可用于监控推理延迟、吞吐量、GPU 使用率等。
-- `GET /logs/stream`
-  - **功能**: 通过 Server-Sent Events (SSE) 向上游（Gateway）提供实时日志流。Gateway 连接此端点以实现集中式日志收集。
-
-### 2. iChat Gateway API
-
-Gateway 是整个系统的统一入口，为客户端和管理员提供服务。
-
-#### a. 数据平面 API (OpenAI 兼容)
-
-Gateway 聚合了所有 Worker 的能力，并提供一个统一的 OpenAI 兼容入口。
-
-- `POST /v1/chat/completions`: 接收客户端的聊天补全请求，并根据 `model` 字段路由到合适的 Worker。
-- `POST /v1/completions`: (传统接口) 接收文本补全请求并路由。
-- `POST /v1/embeddings`: 接收文本嵌入请求并路由。
-- `GET /v1/models`: 聚合所有已注册的、健康的 Worker 的模型信息，并返回一个统一的模型列表。
-- `GET /v1/models/{model_name}`: 获取特定模型的详细信息。
-
-#### b. 控制平面 API
-
-控制平面 API 分为两部分：供 Worker 注册的内部接口和供管理员使用的管理接口。
-
-##### i. Worker-Gateway 交互接口
-
-这些接口由 Worker 主动调用，用于服务发现和状态上报。
-
-- `POST /v1/workers/heartbeat`
-  - **功能**: Worker 启动后，定期向 Gateway 发送心跳。此接口同时处理 **首次注册** 和 **后续心跳**。
-  - **模式**: 采用 "upsert" 逻辑。如果 `worker_id` 首次出现，则视为注册；如果已存在，则更新其状态。
-  - **请求体**: 包含 Worker 的完整元数据，如 `worker_id` (由 Worker 自行生成), `model_name`, `backend`, `host`, `port`, `model_path` 等。
-  - **设计理念**: 简化 Worker 实现，无需区分注册和心跳流程。
-
-- `GET /v1/logs/stream/{worker_id}`
-  - **功能**: Worker 通过 SSE (Server-Sent Events) 将日志实时流式传输到 Gateway，以实现集中式日志管理。
-
-##### ii. 管理员接口
-
-这些接口用于监控和管理整个 iChat 集群。
-
-- `GET /v1/admin/workers`
-  - **功能**: 列出所有已注册的 Worker（包括由 Gateway 管理的和动态注册的），并显示其状态（如 `healthy`, `unhealthy`）、模型、地址等信息。
-
-- `GET /v1/admin/workers/{worker_id}`
-  - **功能**: 获取指定 Worker 的详细信息，包括元数据和健康状态。
-
-- `POST /v1/admin/workers/launch`
-  - **功能**: 动态启动一个新的 Worker 进程。此功能适用于通过 Gateway 按需扩展 Worker 的场景。
-  - **请求体**: 包含启动 Worker 所需的完整配置，如 `model_name`, `model_path`, `backend`, `host`, `port`, `gpu_ids`, `heartbeat_interval` 等。
-
-- `DELETE /v1/admin/workers/{worker_id}`
-  - **功能**: 停止并移除一个由 Gateway 启动的 Worker 实例。
-
-- `GET /v1/admin/cluster/status`
-  - **功能**: 获取整个 iChat 集群的总体状态，包括 Gateway 状态、资源使用情况和已注册 Worker 概览。
-
-- `GET /v1/admin/cluster/version`
-  - **功能**: 获取 iChat Gateway 的版本信息。
 
 ## 贡献
 
