@@ -456,72 +456,20 @@ class ChatModelMixin:
         chunks: AsyncGenerator[CompletionChunk, None],
         reasoning_parser: Optional[ReasoningParser] = None,
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
-        previous_texts = [""]  # For _to_chat_completion_chunk and reasoning_parser
-        # Stores the first raw chunk object that contains text, for merging its text later.
-        first_raw_chunk_to_merge_text_from: Optional[CompletionChunk] = None
-
+        previous_texts = [""]
+        # Process chunks
         if reasoning_parser:
             chunks = reasoning_parser.prepare_reasoning_content_streaming(chunks)
-
-        idx = 0  # Overall counter for raw chunks from the input generator
-        async for current_raw_chunk in chunks:
-            processed_chunk_or_list = None  # Holds the chunk(s) to be yielded for this iteration
-
-            if not current_raw_chunk.get("choices"): 
-                # This is a final/usage chunk (it has no 'choices' key or 'choices' is empty/None)
-                processed_chunk_or_list = cls._get_final_chat_completion_chunk(current_raw_chunk)
+        async for chunk in chunks:
+            choices = chunk.get("choices")
+            if not choices:
+                # usage
+                chat_chunk = cls._get_final_chat_completion_chunk(chunk)
             else:
-                # This is a content chunk (it has 'choices')
-                if idx == 0:
-                    # First raw chunk overall. This needs to be processed by _get_first_chat_completion_chunk.
-                    # This helper can return a list of initial chunks (e.g., role definition, reasoning steps).
-                    processed_chunk_or_list = cls._get_first_chat_completion_chunk(
-                        current_raw_chunk, reasoning_parser
-                    )
-                    
-                    # If this very first raw chunk itself contains text, save this chunk
-                    # so its text can be merged with the next content chunk.
-                    # We assume choices[0] exists because current_raw_chunk.get("choices") was truthy.
-                    if (
-                        len(current_raw_chunk["choices"]) > 0 
-                        and current_raw_chunk["choices"][0].get("text")
-                    ):
-                        first_raw_chunk_to_merge_text_from = current_raw_chunk
-                else:
-                    # This is a subsequent raw chunk (idx > 0) and it's a content chunk.
-                    chunk_to_process_further = current_raw_chunk
-
-                    # Check if we have text from a previously saved first raw chunk to merge.
-                    if first_raw_chunk_to_merge_text_from:
-                        # Extract text from the saved first raw chunk.
-                        text_to_prepend = first_raw_chunk_to_merge_text_from["choices"][0].get("text", "")
-                        
-                        if text_to_prepend:
-                            # Ensure current chunk's choices and choices[0] exist before modifying.
-                            # (Outer 'else' implies choices exists, len check is for choices[0])
-                            if (
-                                len(chunk_to_process_further["choices"]) > 0
-                            ):
-                                current_target_choice = chunk_to_process_further["choices"][0]
-                                current_target_choice["text"] = text_to_prepend + current_target_choice.get("text", "")
-                        
-                        # The text from the first raw chunk has now been merged (or attempted), so clear it.
-                        first_raw_chunk_to_merge_text_from = None 
-                    
-                    # Process the (now potentially text-merged) current raw chunk.
-                    processed_chunk_or_list = cls._to_chat_completion_chunk(
-                        chunk_to_process_further, reasoning_parser, previous_texts
-                    )
-            
-            # Yield the processed output(s)
-            if processed_chunk_or_list is not None:
-                if isinstance(processed_chunk_or_list, list):
-                    for item in processed_chunk_or_list:
-                        yield item
-                else:
-                    yield processed_chunk_or_list
-            
-            idx += 1
+                chat_chunk = cls._to_chat_completion_chunk(
+                    chunk, reasoning_parser, previous_texts
+                )
+            yield chat_chunk
 
     @staticmethod
     def _to_chat_completion(
