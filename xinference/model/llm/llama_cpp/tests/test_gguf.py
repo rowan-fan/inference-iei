@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import base64
 
 import requests
@@ -64,6 +63,7 @@ def test_gguf_multimodal(setup):
         quantization="IQ4_XS",
         multimodal_projector="mmproj-google_gemma-3-4b-it-f16.gguf",
         n_ctx=512,
+        n_batch=512,
         n_parallel=1,
     )
     assert len(client.list_models()) == 1

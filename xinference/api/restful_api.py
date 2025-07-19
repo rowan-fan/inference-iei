@@ -412,8 +412,20 @@ class RESTfulAPI(CancelMixin):
         self._router.add_api_route(
             "/v1/cluster/auth", self.is_cluster_authenticated, methods=["GET"]
         )
+        # just for compatibility, LLM only
         self._router.add_api_route(
             "/v1/engines/{model_name}",
+            self.query_engines_by_model_name,
+            methods=["GET"],
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:list"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        # engines for all model types
+        self._router.add_api_route(
+            "/v1/engines/{model_type}/{model_name}",
             self.query_engines_by_model_name,
             methods=["GET"],
             dependencies=(
@@ -725,6 +737,17 @@ class RESTfulAPI(CancelMixin):
         self._router.add_api_route(
             "/v1/video/generations/image",
             self.create_videos_from_images,
+            methods=["POST"],
+            response_model=VideoList,
+            dependencies=(
+                [Security(self._auth_service, scopes=["models:read"])]
+                if self.is_authenticated()
+                else None
+            ),
+        )
+        self._router.add_api_route(
+            "/v1/video/generations/flf",
+            self.create_videos_from_first_last_frame,
             methods=["POST"],
             response_model=VideoList,
             dependencies=(
@@ -2001,10 +2024,9 @@ class RESTfulAPI(CancelMixin):
         payload = await request.json()
 
         model_uid = payload.get("model")
+        args = payload.get("args")
 
-        exclude = {
-            "model",
-        }
+        exclude = {"model", "args"}
         kwargs = {key: value for key, value in payload.items() if key not in exclude}
 
         try:
@@ -2019,7 +2041,7 @@ class RESTfulAPI(CancelMixin):
             raise HTTPException(status_code=500, detail=str(e))
 
         try:
-            result = await model.infer(**kwargs)
+            result = await model.infer(*args, **kwargs)
             return Response(result, media_type="application/json")
         except Exception as e:
             e = await self._get_model_last_error(model.uid, e)
@@ -2096,6 +2118,57 @@ class RESTfulAPI(CancelMixin):
             self._add_running_task(request_id)
             video_list = await model_ref.image_to_video(
                 image=Image.open(image.file),
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                n=n,
+                **parsed_kwargs,
+            )
+            return Response(content=video_list, media_type="application/json")
+        except asyncio.CancelledError:
+            err_str = f"The request has been cancelled: {request_id}"
+            logger.error(err_str)
+            await self._report_error_event(model_uid, err_str)
+            raise HTTPException(status_code=409, detail=err_str)
+        except Exception as e:
+            e = await self._get_model_last_error(model_ref.uid, e)
+            logger.error(e, exc_info=True)
+            await self._report_error_event(model_uid, str(e))
+            self.handle_request_limit_error(e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def create_videos_from_first_last_frame(
+        self,
+        model: str = Form(...),
+        first_frame: UploadFile = File(media_type="application/octet-stream"),
+        last_frame: UploadFile = File(media_type="application/octet-stream"),
+        prompt: Optional[Union[str, List[str]]] = Form(None),
+        negative_prompt: Optional[Union[str, List[str]]] = Form(None),
+        n: Optional[int] = Form(1),
+        kwargs: Optional[str] = Form(None),
+    ) -> Response:
+        model_uid = model
+        try:
+            model_ref = await (await self._get_supervisor_ref()).get_model(model_uid)
+        except ValueError as ve:
+            logger.error(str(ve), exc_info=True)
+            await self._report_error_event(model_uid, str(ve))
+            raise HTTPException(status_code=400, detail=str(ve))
+        except Exception as e:
+            logger.error(e, exc_info=True)
+            await self._report_error_event(model_uid, str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+
+        request_id = None
+        try:
+            if kwargs is not None:
+                parsed_kwargs = json.loads(kwargs)
+            else:
+                parsed_kwargs = {}
+            request_id = parsed_kwargs.get("request_id")
+            self._add_running_task(request_id)
+            video_list = await model_ref.flf_to_video(
+                first_frame=Image.open(first_frame.file),
+                last_frame=Image.open(last_frame.file),
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 n=n,
@@ -2266,11 +2339,14 @@ class RESTfulAPI(CancelMixin):
                 self.handle_request_limit_error(e)
                 raise HTTPException(status_code=500, detail=str(e))
 
-    async def query_engines_by_model_name(self, model_name: str) -> JSONResponse:
+    async def query_engines_by_model_name(
+        self, request: Request, model_name: str, model_type: Optional[str] = None
+    ) -> JSONResponse:
         try:
+            model_type = model_type or request.path_params.get("model_type", "LLM")
             content = await (
                 await self._get_supervisor_ref()
-            ).query_engines_by_model_name(model_name)
+            ).query_engines_by_model_name(model_name, model_type=model_type)
             return JSONResponse(content=content)
         except ValueError as re:
             logger.error(re, exc_info=True)

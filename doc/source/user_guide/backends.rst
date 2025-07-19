@@ -10,20 +10,40 @@ xinference will automatically select the appropriate backend.
 llama.cpp
 =========
 
-Xinference now supports `xllamacpp <https://github.com/xorbitsai/xllamacpp>`_ which developed by Xinference team,
-and `llama-cpp-python <https://github.com/abetlen/llama-cpp-python>`_ to run llama.cpp backend.
+Xinference now supports `xllamacpp <https://github.com/xorbitsai/xllamacpp>`_ which developed by Xinference team
+to run llama.cpp backend.
 `llama.cpp` is developed based on the tensor library `ggml`, supporting inference of
 the LLaMA series models and their variants.
 
 .. warning::
 
     Since Xinference v1.5.0,
-    ``xllamacpp`` becomes default option for llama.cpp, and ``llama-cpp-python`` will be deprecated.
-    For Xinference v1.6.0, ``llama-cpp-python`` will be removed.
+    ``xllamacpp`` becomes default option for llama.cpp, and ``llama-cpp-python`` is deprecated.
+    Since Xinference v1.6.0, ``llama-cpp-python`` has been removed.
 
-For `llama-cpp-python`, we recommend that users install  on the worker themselves and adjust the `cmake`
-parameters according to the hardware to achieve the best inference efficiency. Please refer to the
-`llama-cpp-python installation guide <https://github.com/abetlen/llama-cpp-python#installation-with-openblas--cublas--clblast--metal>`_.
+
+Auto NGL
+-------------
+
+.. versionadded:: v1.6.1
+    Auto GPU layers estimation is enabled since v1.6.1 when ``n-gpu-layers`` is not specified (default is -1).
+
+This feature automatically detects the number of GPU layers (NGL) for the llama.cpp backend. Please be aware that this
+is not an accurate calculation. Therefore, the ``-ngl`` result might not be the most optimized, and there is still a
+chance of encountering an out-of-memory error.
+
+Currently, there is no official implementation for auto ngl. Please refer to the following issues for more information:
+
+- https://github.com/ggml-org/llama.cpp/issues/13860
+- https://github.com/ggml-org/llama.cpp/pull/6502
+
+Our implementation is based on the Ollama auto ngl, but there are some differences:
+
+- We utilize device information detected by `xllamacpp <https://github.com/xorbitsai/xllamacpp>`_.
+- We have removed support for less popular architectures, these architectures will use the default calculation.
+- We fall back to offloading all the layers to the GPU if the auto ngl fails.
+- We do not support multimodal projectors embedded into the model GGUF, as this is a very experimental feature.
+
 
 Common Issues
 -------------
@@ -103,7 +123,7 @@ Currently, supported model includes:
 - ``codestral-v0.1``
 - ``Yi``, ``Yi-1.5``, ``Yi-chat``, ``Yi-1.5-chat``, ``Yi-1.5-chat-16k``
 - ``code-llama``, ``code-llama-python``, ``code-llama-instruct``
-- ``deepseek``, ``deepseek-coder``, ``deepseek-chat``, ``deepseek-coder-instruct``, ``deepseek-r1-distill-qwen``, ``deepseek-v2-chat``, ``deepseek-v2-chat-0628``, ``deepseek-v2.5``, ``deepseek-v3``, ``deepseek-r1``, ``deepseek-r1-distill-llama``
+- ``deepseek``, ``deepseek-coder``, ``deepseek-chat``, ``deepseek-coder-instruct``, ``deepseek-r1-distill-qwen``, ``deepseek-v2-chat``, ``deepseek-v2-chat-0628``, ``deepseek-v2.5``, ``deepseek-v3``, ``deepseek-v3-0324``, ``deepseek-r1``, ``deepseek-r1-0528``, ``deepseek-prover-v2``, ``deepseek-r1-0528-qwen3``, ``deepseek-r1-distill-llama``
 - ``yi-coder``, ``yi-coder-chat``
 - ``codeqwen1.5``, ``codeqwen1.5-chat``
 - ``qwen2.5``, ``qwen2.5-coder``, ``qwen2.5-instruct``, ``qwen2.5-coder-instruct``, ``qwen2.5-instruct-1m``
@@ -117,19 +137,23 @@ Currently, supported model includes:
 - ``codegeex4``
 - ``qwen1.5-chat``, ``qwen1.5-moe-chat``
 - ``qwen2-instruct``, ``qwen2-moe-instruct``
+- ``XiYanSQL-QwenCoder-2504``
 - ``QwQ-32B-Preview``, ``QwQ-32B``
 - ``marco-o1``
 - ``fin-r1``
 - ``seallms-v3``
-- ``skywork-or1-preview``
+- ``skywork-or1-preview``, ``skywork-or1``
+- ``HuatuoGPT-o1-Qwen2.5``, ``HuatuoGPT-o1-LLaMA-3.1``
+- ``DianJin-R1``
 - ``gemma-it``, ``gemma-2-it``, ``gemma-3-1b-it``
 - ``orion-chat``, ``orion-chat-rag``
 - ``c4ai-command-r-v01``
 - ``minicpm3-4b``
 - ``internlm3-instruct``
 - ``moonlight-16b-a3b-instruct``
+- ``qwenLong-l1``
 - ``qwen3``
-
+- ``minicpm4``
 .. vllm_end
 
 .. _sglang_backend:
