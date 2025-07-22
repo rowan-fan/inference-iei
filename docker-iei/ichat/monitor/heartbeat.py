@@ -15,32 +15,40 @@ class HeartbeatManager:
     can route requests to them.
     """
 
-    def __init__(self, args: Namespace):
+    def __init__(
+        self,
+        framework_args: Namespace,
+        backend_args: Namespace,
+        backend_ready: asyncio.Event,
+    ):
         """
         Initializes the HeartbeatManager.
 
         Args:
-            args: A Namespace object containing parsed command-line arguments,
-                  including gateway configuration and worker details.
+            framework_args: The initial arguments parsed for the iChat framework.
+            backend_args: The final, resolved arguments used by the backend,
+                          which may include default values (e.g., for port).
+            backend_ready: An asyncio.Event that is set when the backend is
+                           fully initialized and ready to serve requests.
         """
-        self.gateway_address = args.gateway_address
-        self.heartbeat_interval = args.heartbeat_interval
+        self.gateway_address = framework_args.gateway_address
+        self.heartbeat_interval = framework_args.heartbeat_interval
+        self.backend_ready = backend_ready
 
-        # Determine the model name for registration. Use the explicit
-        # --served-model-name if provided, otherwise derive it from the model path.
-        self.model_name = (
-            args.served_model_name
-            or args.model_path.strip("/").split("/")[-1]
-        )
-
-        # Generate a unique identifier for this specific worker process.
-        self.worker_id = f"worker-{uuid.uuid4()}"
-
-        # Construct the worker's address that the gateway will use to contact it.
-        # Note: If the host is '0.0.0.0', this assumes the gateway can resolve
-        # it correctly. In containerized environments, a reachable service name
-        # or IP should be used.
-        self.worker_addr = f"http://{args.host}:{args.port}"
+        # Construct the payload once. It will be sent with each heartbeat.
+        # This uses a mix of framework arguments (user intent) and backend
+        # arguments (runtime values).
+        self.payload = {
+            "worker_id": f"worker-{uuid.uuid4()}",
+            "model_name": (
+                framework_args.served_model_name
+                or (framework_args.model_path or "").strip("/").split("/")[-1]
+            ),
+            "model_path": framework_args.model_path,
+            "backend": framework_args.backend,
+            "host": backend_args.host,
+            "port": backend_args.port,
+        }
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._should_stop = asyncio.Event()
@@ -52,49 +60,21 @@ class HeartbeatManager:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    async def _register(self) -> bool:
+    async def _send_heartbeat(self, state: str):
         """
-        Registers the worker with the gateway by sending its metadata.
-
-        Returns:
-            True if registration was successful, False otherwise.
+        Sends a single heartbeat signal to the gateway.
+        This also serves as the registration call, as the gateway
+        is expected to handle this as an "upsert" operation.
         """
         session = await self._get_session()
-        # This endpoint should correspond to the gateway's worker registration API.
-        register_url = f"{self.gateway_address}/api/v1/workers"
-        payload = {
-            "worker_id": self.worker_id,
-            "model_names": [self.model_name],
-            "worker_addr": self.worker_addr,
-        }
+        heartbeat_url = f"{self.gateway_address}/v1/workers/heartbeat"
+
+        payload = self.payload.copy()
+        payload["state"] = state
 
         try:
-            print(f"INFO:     Registering worker {self.worker_id} for model '{self.model_name}' to gateway at {self.gateway_address}...")
-            async with session.post(register_url, json=payload, timeout=10) as response:
-                if response.status == 200:
-                    print(f"INFO:     Worker {self.worker_id} registered successfully.")
-                    return True
-                else:
-                    text = await response.text()
-                    print(
-                        f"ERROR:    Failed to register worker. Gateway returned status {response.status}: {text}"
-                    )
-                    return False
-        except aiohttp.ClientError as e:
-            print(f"ERROR:    Could not connect to gateway for registration: {e}")
-            return False
-        except asyncio.TimeoutError:
-            print("ERROR:    Gateway registration request timed out.")
-            return False
-
-    async def _send_heartbeat(self):
-        """Sends a single heartbeat signal to the gateway."""
-        session = await self._get_session()
-        # This endpoint is for sending periodic health checks.
-        heartbeat_url = f"{self.gateway_address}/api/v1/heartbeat"
-        payload = {"worker_id": self.worker_id}
-
-        try:
+            # The first heartbeat acts as registration.
+            print(f"INFO:     Sending heartbeat for worker {self.payload['worker_id']} with state '{state}'...")
             async with session.post(heartbeat_url, json=payload, timeout=10) as response:
                 if response.status != 200:
                     text = await response.text()
@@ -108,8 +88,15 @@ class HeartbeatManager:
 
     async def _heartbeat_loop(self):
         """The main loop that periodically sends heartbeats."""
+        # Wait until the backend signals that it is ready.
+        # This prevents the worker from being registered at the gateway
+        # before the model is loaded, which would cause requests to fail.
+        print("INFO:     Heartbeat service waiting for backend to be ready...")
+        await self.backend_ready.wait()
+        print("INFO:     Backend is ready. Starting heartbeat loop.")
+
         while not self._should_stop.is_set():
-            await self._send_heartbeat()
+            await self._send_heartbeat(state="ready")
             try:
                 # Wait for the specified interval, but break immediately if
                 # a stop signal is received.
@@ -122,24 +109,20 @@ class HeartbeatManager:
 
     async def start(self):
         """
-        Starts the heartbeat service.
-
-        It first attempts to register the worker. If successful, it starts the
-        periodic heartbeat loop in a background task.
+        Starts the heartbeat service. It first registers the worker in an
+        'initializing' state, then runs the heartbeat loop in a background task
+        which will switch the state to 'ready' once the backend is available.
         """
-        # Retry registration a few times in case the gateway is not yet ready.
-        for i in range(3):
-            if await self._register():
-                # On success, start the background heartbeat task.
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-                return
+        if not self.gateway_address:
+            print("INFO:     Gateway address not provided. Heartbeat service disabled.")
+            return
 
-            print(f"INFO:     Registration attempt {i + 1}/3 failed. Retrying in 5 seconds...")
-            await asyncio.sleep(5)
+        print(f"INFO:     Starting heartbeat service for worker {self.payload['worker_id']}.")
 
-        print(
-            "ERROR:    Worker registration failed after multiple attempts. Heartbeat service will not start."
-        )
+        # Pre-register worker as initializing. This is a fire-and-forget call.
+        asyncio.create_task(self._send_heartbeat(state="initializing"))
+
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def stop(self):
         """Stops the heartbeat manager gracefully."""
@@ -151,7 +134,12 @@ class HeartbeatManager:
 
         if self._heartbeat_task:
             # Wait for the heartbeat task to finish its current cycle and exit.
-            await self._heartbeat_task
+            # Add a timeout to prevent hanging.
+            try:
+                await asyncio.wait_for(self._heartbeat_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                print("WARNING:  Heartbeat task did not stop gracefully. Cancelling.")
+                self._heartbeat_task.cancel()
 
         if self._session:
             await self._session.close()

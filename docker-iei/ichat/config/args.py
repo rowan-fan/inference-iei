@@ -53,6 +53,28 @@ def parse_worker_args():
         action="store_true",
         help="Enable streaming of logs to the iChat Gateway.",
     )
+    ichat_group.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host for the worker to listen on.",
+    )
+    ichat_group.add_argument(
+        "--port", type=int, default=None, help="Port for the worker to listen on."
+    )
+    ichat_group.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="The path to the model weights.",
+    )
+    ichat_group.add_argument(
+        "--served-model-name",
+        type=str,
+        default=None,
+        help="The name to use for the served model, overriding the model's default name.",
+    )
+
 
     # 2. Parse known args to separate framework-specific args from backend-specific ones.
     # We slice sys.argv to exclude the script name itself.

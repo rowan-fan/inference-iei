@@ -34,11 +34,17 @@ class SGLangBackend(BaseBackend):
     An adapter class that provides fine-grained control over the SGLang server lifecycle.
     """
 
-    def __init__(self, framework_args: Namespace, backend_argv: List[str]):
+    def __init__(
+        self,
+        framework_args: Namespace,
+        backend_argv: List[str],
+        backend_ready_event: asyncio.Event,
+    ):
         """
         Initializes the backend and prepares SGLang arguments.
         """
         super().__init__(framework_args, backend_argv)
+        self.server_ready = backend_ready_event
         self.sglang_args: ServerArgs = self._parse_sglang_args(backend_argv)
 
         self.app = None
@@ -68,6 +74,10 @@ class SGLangBackend(BaseBackend):
         server_args.check_server_args()
         
         return server_args
+
+    def get_backend_args(self) -> ServerArgs:
+        """Returns the parsed and resolved arguments for the backend."""
+        return self.sglang_args
 
     async def run(self):
         """
