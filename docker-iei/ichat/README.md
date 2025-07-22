@@ -94,7 +94,7 @@ iChat的开发遵循以下核心原则：
 2.  **扩展性优先**: 通过配置文件驱动的动态路由机制，可以轻松地水平扩展Worker节点，以支持更多模型或提供更高吞吐量。
 3.  **引擎解耦**: Worker与推理引擎（如vLLM, SGLang）完全解耦，方便未来快速扩展支持新的推理引擎。
 4.  **vLLM为默认引擎**: Worker默认采用vLLM，用户可通过`--backend`参数显式指定。
-5.  **统一参数标准**: Worker的核心参数以vLLM为基准（snake_case），iChat内部会自动映射到其他引擎的格式。
+5.  **统一与透传结合的参数策略**: iChat定义了一套统一的核心参数（如`--model-path`），后端负责将其映射到自身的参数格式（如vLLM的`--model`），为用户提供了一致的配置体验。同时，所有后端原生支持的、未被统一的参数（如`--tensor-parallel-size`）可以被直接“透传”给后端，实现了最大的灵活性。
 6.  **设计驱动开发**: 所有重大架构变更和功能开发都首先在`README.md`中进行清晰的设计和规划。
 7.  **集中式管理**: Gateway作为中心控制点，可以集中管理所有Worker的生命周期和资源分配。
 8.  **自愈能力**: 通过心跳机制，系统能够自动检测和处理Worker节点故障。
@@ -103,15 +103,15 @@ iChat的开发遵循以下核心原则：
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| **Gateway** | 待开发 | API网关，基于LiteLLM，负责请求路由 |
-| **Worker (`serve.py`)** | 待开发 | 负责加载并运行单个模型实例 |
-| **服务注册与发现** | 待开发 | Worker向Gateway注册并发送心跳的机制 |
-| **日志流传输** | 待开发 | Worker通过SSE向Gateway传输日志 |
-| **Worker生命周期管理** | 待开发 | Gateway管理Worker的启动、监控和关闭 |
-| 参数统一处理 | 待开发 | Worker的命令行参数解析与转换 |
-| vLLM引擎适配 | 待开发 | vLLM推理引擎在Worker中的集成 |
-| SGLang引擎适配 | 待开发 | SGLang推理引擎在Worker中的集成 |
-| 手动多模型部署 | 待开发 | 通过启动多个Worker实例并由Gateway管理实现 |
+| **Gateway** | 开发中 | API网关，基于LiteLLM，负责请求路由和Worker管理 |
+| **Worker (`serve.py`)** | 已完成 | 负责加载并运行单个模型实例，实现了优雅的生命周期管理 |
+| **服务注册与发现** | 已完成 | Worker可向Gateway自动注册并发送心跳 |
+| **日志流传输** | 已完成 | Worker可通过SSE向Gateway实时流式传输日志 |
+| **Worker生命周期管理** | 已完成 | 由`serve.py`实现独立的生命周期控制，并接受Gateway的管理 |
+| 参数统一处理 | 已完成 | Worker实现了框架与后端参数的分离处理，支持统一参数与原生参数透传 |
+| vLLM引擎适配 | 已完成 | vLLM作为后端引擎的深度集成与生命周期管理 |
+| SGLang引擎适配 | 已完成 | SGLang作为后端引擎的深度集成与生命周期管理 |
+| 手动多模型部署 | 已完成 | 支持通过启动多个Worker实例并由Gateway统一管理 |
 | 分布式推理 | 待开发 | Worker支持单机/多机分布式。多机模式需手动建立Ray集群。|
 | 多模态支持 | 待开发 | 图像、音频等多模态能力 |
 | Embedding支持 | 待开发 | 文本嵌入模型支持 |
@@ -186,21 +186,21 @@ python gateway.py --config config.yaml
 ```bash
 # Worker 1: 在GPU 0上部署model-a
 CUDA_VISIBLE_DEVICES=0 python serve.py \
-  --model /path/to/model_A \
-  --port 8001 \
   --backend vllm \
-  --gateway-address http://<GATEWAY_HOST>:4000 \
-  --model-name model-a-dynamic
+  --model-path /path/to/model_A \
+  --served-model-name model-a-dynamic \
+  --port 8001 \
+  --gateway-address http://<GATEWAY_HOST>:4000
 
-# Worker 2: 在GPU 1,2上部署large-model-b
+# Worker 2: 在GPU 1,2上部署large-model-b (TP=2)
 CUDA_VISIBLE_DEVICES=1,2 python serve.py \
-  --model /path/to/large_model_B \
+  --backend vllm \
+  --model-path /path/to/large_model_B \
+  --served-model-name large-model-b-dynamic \
   --port 8002 \
   --tensor-parallel-size 2 \
-  --gateway-address http://<GATEWAY_HOST>:4000 \
-  --model-name large-model-b-dynamic
+  --gateway-address http://<GATEWAY_HOST>:4000
 ```
-*请注意：`--gateway`参数已更新为`--gateway-address`以提高清晰度。*
 
 每个Worker启动后会：
 1. 向Gateway的`/register`接口发送注册请求。

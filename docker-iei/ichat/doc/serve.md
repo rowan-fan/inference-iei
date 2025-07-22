@@ -33,7 +33,10 @@
 3.  **实例化后端**: 根据 `args.backend` 的值，选择并实例化对应的后端类 (`VLLMBackend` 或 `SGLangBackend`)。将框架参数对象和后端原始参数列表都传递给后端构造函数。后端将负责解析它所需要的参数。
 4.  **管理后台任务**: 使用 `lifespan` 异步上下文管理器来启动和停止所有后台服务。目前主要是 `HeartbeatManager`。
 5.  **运行主服务**: 在 `lifespan` 上下文内，创建 `asyncio.Task` 来运行 `backend.run()` 方法。这是推理服务的主任务。
-6.  **等待与关闭**: 通过 `asyncio.wait` 同时等待主服务任务完成或全局 `shutdown_event` 被触发。一旦收到关闭信号，它会确保 `server_task` 被取消，从而触发整个清理流程。
+6.  **等待与关闭**: `main` 函数会创建一个 `server_task` (用于运行 `backend.run()`) 和一个 `shutdown_task` (用于等待 `shutdown_event`)。它使用 `asyncio.wait` 等待这两个任务中的任何一个首先完成。
+    *   **如果收到外部信号 (如 `Ctrl+C`)**: `shutdown_event` 被设置，`shutdown_task` 完成。程序会取消仍在运行的 `server_task`。
+    *   **如果后端服务自行退出 (正常或崩溃)**: `server_task` 完成。程序会主动设置 `shutdown_event`，以确保所有其他后台任务（如心跳）也能收到关闭信号，然后取消 `shutdown_task`。
+    这种双向的关闭机制确保了无论是由外部信号还是内部服务故障触发的关闭，整个 Worker 都能被优雅地清理和终止。
 
 ### 3.2. `lifespan()` 上下文管理器
 
@@ -97,13 +100,14 @@ graph TD
     D -- gateway-address 已配置 --> E[启动心跳后台任务];
     E --> F[实例化推理后端];
     D -- gateway-address 未配置 --> F;
-    F --> G[创建 Task 并调用 backend.run()];
-    G --> H{等待服务Task完成或收到关闭信号};
-    H -- 收到终止信号 --> I[取消服务Task];
-    I --> J[退出 lifespan 上下文];
-    J --> K[停止心跳后台任务];
-    K --> L[结束];
-    H -- 服务Task正常/异常结束 --> J;
+    F --> G[创建后端服务Task和关闭信号Task];
+    G --> H{等待任一Task首先完成};
+    H --> I{无论哪个Task先完成, 都触发优雅关闭};
+    I --> J[设置关闭事件(若未设置)并取消其他任务];
+    J --> K[等待所有任务完成清理];
+    K --> L[退出 lifespan 上下文];
+    L --> M[停止心跳后台任务];
+    M --> N[结束];
 ```
 
 ## 5. `serve.py` 完整代码架构
@@ -164,41 +168,52 @@ async def main():
     framework_args, backend_argv = parse_worker_args()
 
     # 2. 设置日志系统
-    # 可根据参数配置将日志流式传输到 Gateway
     setup_logging(
-        log_level=framework_args.log_level, 
-        stream_to_gateway=framework_args.log_streaming, 
-        gateway_address=framework_args.gateway_address
+        log_level=getattr(framework_args, "log_level", "INFO"),
+        stream_to_gateway=getattr(framework_args, "log_streaming", False),
+        gateway_address=getattr(framework_args, "gateway_address", None),
     )
 
     # 3. 根据参数动态实例化推理后端
-    # 将框架参数和后端专属参数列表都传递给后端
     if framework_args.backend == 'vllm':
+        from .backends.vllm_backend import VLLMBackend
         backend = VLLMBackend(framework_args, backend_argv)
     elif framework_args.backend == 'sglang':
+        from .backends.sglang_backend import SGLangBackend
         backend = SGLangBackend(framework_args, backend_argv)
     else:
-        # 如果提供了不支持的后端，则快速失败
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
 
     # 4. 使用 lifespan 上下文管理器来运行服务
     async with lifespan(framework_args):
-        # 创建一个任务来运行后端服务
+        # 创建后端服务任务和关闭信号监听任务
         server_task = asyncio.create_task(backend.run())
-        
-        # 等待两个事件中的任何一个发生：
-        # - server_task 完成（正常或异常退出）
-        # - shutdown_event 被设置（接收到外部信号）
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+        # 等待任一任务首先完成
         done, pending = await asyncio.wait(
-            [server_task, shutdown_event.wait()], 
-            return_when=asyncio.FIRST_COMPLETED
+            {server_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
 
-        # 如果是关闭信号触发了退出，并且服务器任务仍在运行，则取消它
-        if shutdown_event.is_set() and not server_task.done():
-            server_task.cancel()
-            # 等待任务实际被取消
-            await asyncio.sleep(1) 
+        # 如果是后端服务Task完成（例如崩溃），则主动触发全局关闭
+        if server_task in done and not shutdown_event.is_set():
+            print("INFO:     Backend task completed. Initiating graceful shutdown...")
+            shutdown_event.set()
+        
+        # 此刻，关闭信号已发出，取消所有仍在运行的挂起任务
+        for task in pending:
+            task.cancel()
+            
+        # 等待所有原始任务（包括已完成和刚被取消的）完成其清理过程
+        await asyncio.gather(server_task, shutdown_task, return_exceptions=True)
+
+        # （可选）记录关闭原因
+        if server_task.done() and not shutdown_task.done():
+             # ... 检查并记录后端任务的退出状态 ...
+             pass
+        else:
+             print("INFO:     Shutdown signal received, server has stopped.")
 
 if __name__ == "__main__":
     # 注册信号处理程序以实现优雅关闭
