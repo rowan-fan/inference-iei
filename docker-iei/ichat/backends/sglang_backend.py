@@ -5,6 +5,7 @@ import time
 import requests
 import uvicorn
 import logging
+import aiohttp
 from argparse import ArgumentParser, Namespace
 from typing import Optional, Coroutine, List
 
@@ -42,6 +43,7 @@ class SGLangBackend(BaseBackend):
         self.app = None
         self.tokenizer_manager = None
         self.server_task: Optional[asyncio.Task] = None
+        self.server_shutdown_event: Optional[asyncio.Event] = None
 
     def _parse_sglang_args(self, backend_argv: List[str]) -> ServerArgs:
         """
@@ -87,15 +89,21 @@ class SGLangBackend(BaseBackend):
         This is an adaptation of SGLang's `launch_server` function.
         """
         # 1. Launch SGLang engine subprocesses (Tokenizer, Scheduler, Detokenizer).
-        self.tokenizer_manager, scheduler_info = _launch_subprocesses(
-            server_args=self.sglang_args
-        )
+        (
+            tokenizer_manager,
+            template_manager,
+            scheduler_info,
+            *_,
+        ) = _launch_subprocesses(server_args=self.sglang_args)
+
+        self.tokenizer_manager = tokenizer_manager
 
         # 2. Set the global state required by SGLang's API endpoints.
         set_global_state(
             _GlobalState(
                 tokenizer_manager=self.tokenizer_manager,
                 scheduler_info=scheduler_info,
+                template_manager=template_manager,
             )
         )
 
@@ -112,28 +120,55 @@ class SGLangBackend(BaseBackend):
             f"Starting SGLang server on http://{self.sglang_args.host}:{self.sglang_args.port}"
         )
 
-        # 4. Create server and warmup coroutines.
-        server_coro = self._serve_http()
-        warmup_coro = self._wait_and_warmup()
+        # 4. Create and monitor tasks.
+        server_task = asyncio.create_task(self._serve_http())
+        
+        # Wait for the model to load and the server to be ready.
+        try:
+            await self._wait_and_warmup()
+        except Exception as e:
+            logger.error(f"SGLang server failed during startup: {e}")
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+            raise # Re-raise to trigger cleanup
 
-        # 5. Concurrently run the server and the warmup process.
-        await asyncio.gather(server_coro, warmup_coro)
+        # Once ready, start the continuous health check monitor.
+        health_check_task = asyncio.create_task(self._health_check_monitor())
+        
+        # Monitor both tasks. If one fails, the other is cancelled.
+        pending = {server_task, health_check_task}
+        try:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                if task.exception():
+                    raise task.exception()
+        finally:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
 
     def _serve_http(self) -> Coroutine:
         """
         Configures and creates the Uvicorn server instance as a coroutine.
         """
         assert self.app is not None, "FastAPI app has not been initialized."
+        log_level = (
+            self.sglang_args.log_level_http or self.sglang_args.log_level
+        )
         config = uvicorn.Config(
             self.app,
             host=self.sglang_args.host,
             port=self.sglang_args.port,
-            log_level=self.sglang_args.log_level_http or self.sglang_args.log_level,
+            log_level=log_level.lower(),
             timeout_keep_alive=5,
             loop="uvloop",
         )
         
         server = uvicorn.Server(config)
+        self.server_shutdown_event = server.should_exit
         server.install_signal_handlers = lambda: {}  # type: ignore
         
         return server.serve()
@@ -143,60 +178,76 @@ class SGLangBackend(BaseBackend):
         Waits for the server to be healthy and then sends a warmup request.
         """
         headers = {}
-        url = self.sglang_args.url()
+        base_url = self.sglang_args.url()
         if self.sglang_args.api_key:
             headers["Authorization"] = f"Bearer {self.sglang_args.api_key}"
 
         # Wait until the server is launched
-        success = False
-        last_traceback = ""
-        for _ in range(120):  # Wait for up to 2 minutes
-            await asyncio.sleep(1)
-            try:
-                res = requests.get(url + "/get_model_info", timeout=5, headers=headers)
-                if res.status_code == 200:
-                    success = True
-                    break
-            except requests.exceptions.RequestException:
-                last_traceback = get_exception_traceback()
+        logger.info("Waiting for SGLang server to be ready...")
+        health_url = base_url + "/get_model_info"
         
-        if not success:
-            logger.error(f"SGLang server failed to start. Last error: {last_traceback}")
-            # Cancel the main server task to trigger cleanup
-            if self.server_task:
-                self.server_task.cancel()
-            return
-
-        model_info = res.json()
-
-        # Send a warmup request
-        request_name = "/generate" if model_info["is_generation"] else "/encode"
-        max_new_tokens = 8 if model_info["is_generation"] else 1
-        json_data = {
-            "text": "The capital city of France is",
-            "sampling_params": {
-                "temperature": 0,
-                "max_new_tokens": max_new_tokens,
-            },
-        }
-
-        try:
-            res = requests.post(url + request_name, json=json_data, headers=headers, timeout=600)
-            res.raise_for_status()
-        except Exception:
-            logger.error(f"SGLang warmup request failed: {get_exception_traceback()}")
-            if self.server_task:
-                self.server_task.cancel()
-            return
+        async with aiohttp.ClientSession() as session:
+            while True:
+                await asyncio.sleep(1)
+                try:
+                    async with session.get(health_url, timeout=5, headers=headers) as res:
+                        if res.status == 200:
+                            model_info = await res.json()
+                            logger.info("SGLang server is up.")
+                            break
+                except aiohttp.ClientError:
+                    pass # Keep trying
+        
+            # Send a warmup request
+            request_name = "/generate" if model_info["is_generation"] else "/encode"
+            max_new_tokens = 8 if model_info["is_generation"] else 1
+            json_data = {
+                "text": "The capital city of France is",
+                "sampling_params": {
+                    "temperature": 0,
+                    "max_new_tokens": max_new_tokens,
+                },
+            }
+            warmup_url = base_url + request_name
+            try:
+                async with session.post(warmup_url, json=json_data, headers=headers, timeout=600) as res:
+                    res.raise_for_status()
+            except Exception:
+                logger.error(f"SGLang warmup request failed: {get_exception_traceback()}")
+                raise # Re-raise to fail the backend startup
         
         logger.info("SGLang backend server is warmed up and ready to roll!")
         self.server_ready.set()
+
+    async def _health_check_monitor(self):
+        """
+        Monitors the health of the SGLang engine continuously after startup.
+        """
+        headers = {}
+        health_url = self.sglang_args.url() + "/get_model_info"
+        if self.sglang_args.api_key:
+            headers["Authorization"] = f"Bearer {self.sglang_args.api_key}"
+
+        async with aiohttp.ClientSession() as session:
+            while True:
+                await asyncio.sleep(10)
+                try:
+                    async with session.get(health_url, timeout=5, headers=headers) as resp:
+                        if resp.status != 200:
+                            logger.error(f"SGLang health check returned status {resp.status}.")
+                            raise RuntimeError(f"SGLang health check failed.")
+                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                    logger.error(f"SGLang engine is unresponsive: {e}")
+                    raise RuntimeError("SGLang engine is unresponsive.") from e
 
     def cleanup(self):
         """
         Gracefully cleans up all server resources.
         """
         logger.info("Cleaning up SGLang backend resources...")
+        if self.server_shutdown_event and not self.server_shutdown_event.is_set():
+            self.server_shutdown_event.set()
+
         if self.server_task and not self.server_task.done():
             self.server_task.cancel()
         
