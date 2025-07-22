@@ -145,12 +145,9 @@ class SGLangBackend(BaseBackend):
 
         # Once ready, start the continuous health check monitor.
         health_check_task = asyncio.create_task(self._health_check_monitor())
-        
-        # Start a separate monitor to check if subprocesses are alive.
-        process_monitor_task = asyncio.create_task(self._subprocess_monitor())
-        
-        # Monitor all tasks. If one fails, the others are cancelled.
-        pending = {server_task, health_check_task, process_monitor_task}
+
+        # Monitor both tasks. If one fails, the other is cancelled.
+        pending = {server_task, health_check_task}
         try:
             done, pending = await asyncio.wait(
                 pending, return_when=asyncio.FIRST_COMPLETED
@@ -234,41 +231,6 @@ class SGLangBackend(BaseBackend):
         self.server_ready.set()
 
     async def _health_check_monitor(self):
-        """
-        Monitors the health of the SGLang engine continuously after startup.
-        
-        This check is crucial for detecting if the underlying SGLang engine, which runs
-        in separate subprocesses, has crashed. A simple HTTP check to an endpoint like
-        `/get_model_info` is insufficient because the main FastAPI server can remain
-        responsive even when its worker processes have failed.
-
-        To solve this, we use the `/health_generate` endpoint. This endpoint triggers a
-        minimal end-to-end inference request (generating a single token). If this request
-        fails or times out, it indicates a genuine problem with the inference engine,
-        allowing the backend to detect the failure and shut down properly.
-        """
-        headers = {}
-        # Use `/health_generate` for a comprehensive check, not `/get_model_info`.
-        health_url = self.sglang_args.url() + "/health_generate"
-        if self.sglang_args.api_key:
-            headers["Authorization"] = f"Bearer {self.sglang_args.api_key}"
-
-        async with aiohttp.ClientSession() as session:
-            while True:
-                await asyncio.sleep(10)
-                try:
-                    # The timeout for the health check is handled internally by the SGLang
-                    # `/health_generate` endpoint (20s), so we set a slightly larger
-                    # timeout here to catch network issues or a completely hung server.
-                    async with session.get(health_url, timeout=30, headers=headers) as resp:
-                        if resp.status != 200:
-                            logger.error(f"SGLang health check returned status {resp.status}.")
-                            raise RuntimeError(f"SGLang health check failed.")
-                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                    logger.error(f"SGLang engine is unresponsive: {e}")
-                    raise RuntimeError("SGLang engine is unresponsive.") from e
-
-    async def _subprocess_monitor(self):
         """
         Monitors the health of SGLang subprocesses directly.
 
