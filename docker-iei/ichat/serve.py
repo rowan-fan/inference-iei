@@ -8,8 +8,6 @@ from typing import Any
 # Assume that the execution environment is configured so that 'ichat' is a package.
 # This allows for consistent relative imports within the application.
 try:
-    from .backends.sglang_backend import SGLangBackend
-    from .backends.vllm_backend import VLLMBackend
     from .config.args import parse_worker_args
     from .monitor.heartbeat import HeartbeatManager
     from .utils.logger import setup_logging
@@ -74,7 +72,7 @@ async def main() -> None:
 
     This function orchestrates the entire worker lifecycle, from parsing arguments
     and setting up logging to running the inference backend and managing
-    a graceful shutdown.
+    a graceful shutdown. The auto-restart mechanism has been removed.
     """
     # 1. Parse iChat framework-specific arguments, separating them from backend-specific ones.
     framework_args, backend_argv = parse_worker_args()
@@ -89,30 +87,59 @@ async def main() -> None:
 
     # 3. Dynamically instantiate the specified inference backend.
     if framework_args.backend == "vllm":
+        from .backends.vllm_backend import VLLMBackend
+
         backend = VLLMBackend(framework_args, backend_argv)
     elif framework_args.backend == "sglang":
+        from .backends.sglang_backend import SGLangBackend
+
         backend = SGLangBackend(framework_args, backend_argv)
     else:
         # If an unsupported backend is requested, fail immediately.
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
 
-    # 4. Run the main service within the lifespan context to manage background tasks.
+    # 4. Run the main service within the lifespan context.
     async with lifespan(framework_args):
-        # The backend's run() method is the main long-running service task.
+        # Create tasks for the backend and for waiting on a shutdown signal.
         server_task = asyncio.create_task(backend.run())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
 
-        # Wait for either the server to exit or a shutdown signal to be received.
-        await asyncio.wait(
-            [server_task, shutdown_event.wait()],
+        # Wait for either the server to complete or a shutdown signal to be received.
+        done, pending = await asyncio.wait(
+            {server_task, shutdown_task},  # Use a set for clarity
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        # If the shutdown was triggered by a signal, cancel the server task
-        # to allow it to clean up and exit gracefully.
-        if shutdown_event.is_set() and not server_task.done():
-            server_task.cancel()
-            # Wait for the task to acknowledge cancellation.
-            await asyncio.sleep(1)
+        # Check if the backend task is the one that completed
+        if server_task in done:
+            # If the backend task finished, it could be a crash or a normal exit.
+            # We set the shutdown event regardless to ensure all other tasks stop.
+            if not shutdown_event.is_set():
+                print("INFO:     Backend task completed. Initiating graceful shutdown...")
+                shutdown_event.set()
+        
+        # At this point, either the backend crashed or a shutdown signal was received.
+        # All pending tasks must be cancelled.
+        for task in pending:
+            task.cancel()
+            
+        # Await all original tasks to ensure they complete their cancellation/cleanup.
+        # This prevents the script from exiting prematurely or hanging.
+        await asyncio.gather(server_task, shutdown_task, return_exceptions=True)
+
+        # Log the reason for shutdown
+        if server_task.done() and not shutdown_task.done():
+            try:
+                exc = server_task.exception()
+                if exc:
+                    print(f"ERROR:    Backend exited unexpectedly with an exception: {exc}")
+                else:
+                    print("ERROR:    Backend exited unexpectedly without an exception.")
+            except asyncio.CancelledError:
+                # This can happen if shutdown was initiated elsewhere.
+                print("INFO:     Backend task was cancelled during shutdown.")
+        else:
+            print("INFO:     Shutdown signal received, server has stopped.")
 
 
 if __name__ == "__main__":

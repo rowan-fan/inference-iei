@@ -1,4 +1,4 @@
 #! /bin/bash
 cd $(dirname $0)
 
-docker build -t inais/llm-serving:8.0 -f Dockerfile ..
+docker build -t ichat:test -f Dockerfile.ichat .

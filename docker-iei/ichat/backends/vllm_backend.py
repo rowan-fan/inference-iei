@@ -4,8 +4,11 @@ import asyncio
 import signal
 import socket
 import argparse
+import os
 from argparse import Namespace
 from typing import Any, Coroutine, List, Optional
+import aiohttp
+import psutil
 
 import uvicorn
 from fastapi import FastAPI
@@ -20,10 +23,12 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.utils import is_valid_ipv6_address, set_ulimit
+from vllm.utils import (FlexibleArgumentParser, is_valid_ipv6_address,
+                        set_ulimit)
 from vllm._version import __version__ as VLLM_VERSION
 
 from .base_backend import BaseBackend
+from .. import serve
 
 
 class VLLMBackend(BaseBackend):
@@ -52,14 +57,19 @@ class VLLMBackend(BaseBackend):
         self.server_task: Optional[asyncio.Task] = None
         self.server_shutdown_event: Optional[asyncio.Event] = None
         self.sock: Optional[socket.socket] = None
+        self.worker_pid: Optional[int] = None
         
     def _parse_vllm_args(self, backend_argv: List[str]) -> Namespace:
         """
         Parses vLLM-specific arguments, including unified arguments from iChat.
         """
         # 1. Create a parser for vLLM to define all its arguments
-        parser = make_arg_parser()
-        
+        # The make_arg_parser function from vllm now expects an existing parser.
+        parser = FlexibleArgumentParser(
+            prog="vllm",
+            description="vLLM-backed iChat server for OpenAI-compatible API.")
+        make_arg_parser(parser)
+
         # 2. Add iChat's unified arguments to the parser for recognition
         # These arguments might not be in vLLM's default parser, so we add them
         # to ensure they are parsed correctly.
@@ -167,37 +177,108 @@ class VLLMBackend(BaseBackend):
             await init_app_state(self.engine_client, self.vllm_config, self.app.state, self.vllm_args)
 
             print(f"INFO:     Starting vLLM server on {listen_address}")
-            
-            # Start the Uvicorn server in a separate task
-            server_coro = self._serve_http(sock=sock, **uvicorn_kwargs)
-            warmup_coro = self._wait_and_warmup()
 
-            await asyncio.gather(server_coro, warmup_coro)
-    
+            # Create coroutines for the server and the health check
+            server_task = asyncio.create_task(self._serve_http(sock=sock, **uvicorn_kwargs))
+            health_check_task = asyncio.create_task(self._health_check_monitor())
+            
+            # The warmup must complete before we can consider the server fully running.
+            # It needs the server task to be running in the background.
+            await self._wait_and_warmup()
+            
+            # Now that warmup is done, we monitor the long-running server and health-check tasks.
+            # If either one fails, we'll shut everything down.
+            pending = {server_task, health_check_task}
+            try:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # If a task has an exception, retrieve and re-raise it.
+                # This will propagate the error up to backend.run()
+                for task in done:
+                    if task.exception():
+                        raise task.exception()
+            finally:
+                # Gracefully cancel all pending tasks on exit.
+                for task in pending:
+                    task.cancel()
+                # Ensure cancellation is processed.
+                await asyncio.gather(*pending, return_exceptions=True)
+                print("INFO:     vLLM worker tasks have been cleaned up.")
+
+    async def _health_check_monitor(self):
+        """
+        Monitors the health of the vLLM engine. If the engine becomes unhealthy
+        (e.g., the worker process dies), this task will raise an exception,
+        triggering a shutdown of the backend.
+        """
+        if not self.engine_client:
+            return
+
+        # The MQLLMEngineClient which holds the process handle is nested
+        # inside the AsyncLLMEngine.
+        mq_engine_client = getattr(self.engine_client, 'engine_client', None)
+        engine_process = getattr(mq_engine_client, '_engine_process', None)
+
+        if not isinstance(engine_process, psutil.Process):
+            print("WARN:     Could not get vLLM engine process object. "
+                  "Health checks will rely on RPC timeouts.")
+            engine_process = None
+
+        await asyncio.sleep(15)
+
+        while True:
+            await asyncio.sleep(5)
+            try:
+                # Priority 1: Direct process check using psutil. This is the most
+                # reliable and fastest way to detect if the worker was killed.
+                if engine_process:
+                    if not engine_process.is_running() or \
+                       engine_process.status() == psutil.STATUS_ZOMBIE:
+                        raise RuntimeError("vLLM worker process is not running or is a zombie.")
+
+                # Priority 2: Liveness check via RPC. This is for cases where
+                # the process is running but stuck (unresponsive).
+                await asyncio.wait_for(self.engine_client.is_sleeping(), timeout=10.0)
+                print("INFO:     vLLM engine is healthy.")
+
+            except psutil.NoSuchProcess:
+                print("ERROR:    vLLM worker process no longer exists. Triggering shutdown.")
+                raise RuntimeError("vLLM worker process does not exist.")
+            
+            except asyncio.TimeoutError:
+                print("ERROR:    vLLM engine is unresponsive (RPC timed out). Triggering shutdown.")
+                raise RuntimeError("vLLM engine is unresponsive.")
+
+            except Exception as e:
+                # This will catch any other exception and trigger a shutdown.
+                print(f"ERROR:    vLLM engine health check failed: {e}. Triggering shutdown.")
+                raise RuntimeError(f"vLLM engine health check failed: {e}")
+
     async def _wait_and_warmup(self):
         """
-        Waits for the server to be healthy and then sends a warmup request.
+        Waits for the server to be healthy. This may take a long time
+        for large models to load.
         """
-        import requests
-        from vllm.utils import get_exception_traceback
+        health_url = f"http://{self.vllm_args.host or 'localhost'}:{self.vllm_args.port}/health"
 
-        health_url = f"http://{self.vllm_args.host}:{self.vllm_args.port}/health"
+        print("INFO:     Waiting for model to load. This may take a while...")
 
-        # Wait until the server is launched
-        for _ in range(120):  # Wait for up to 2 minutes
-            await asyncio.sleep(1)
+        # Wait until the server is launched, checking every 5 seconds.
+        # This will block indefinitely until the server is ready.
+        while True:
+            await asyncio.sleep(5)
             try:
-                res = requests.get(health_url, timeout=5)
-                if res.status_code == 200:
-                    print("INFO:     vLLM server is healthy.")
-                    self.server_ready.set()
-                    return
-            except requests.exceptions.RequestException:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(health_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            print("INFO:     vLLM server is healthy.")
+                            # self.server_ready.set() was removed as it's not used
+                            return
+            except aiohttp.ClientError:
+                # This is expected if the server is not up yet.
                 pass
-        
-        print("ERROR:    vLLM server failed to start after 2 minutes.")
-        if self.server_task:
-            self.server_task.cancel()
 
 
     def _serve_http(self, sock: socket.socket, **uvicorn_kwargs: Any) -> Coroutine:
@@ -237,7 +318,7 @@ class VLLMBackend(BaseBackend):
             self.sock.close()
             self.sock = None
         
-        if self.server_task and not self.server_task.done():
+        if self.server_task and not self.server_task.done(): # This is the line I'm adding the check to
             self.server_task.cancel()
             
         print("INFO:     VLLM backend has stopped.")
