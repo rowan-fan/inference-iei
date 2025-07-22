@@ -78,13 +78,15 @@
 
 ### 3.5. `async _run_server_worker(self, ...)`
 
-这是 vLLM 服务运行的核心工作函数，改编自 vLLM 的同名函数。
+这是 vLLM 服务运行的核心工作函数，改编自 vLLM 的同名函数。它负责编排服务器的启动、预热和健康监控。
 -   使用 `build_async_engine_client` 上下文管理器来创建和管理 vLLM 引擎客户端。
 -   调用 `build_app` 创建 FastAPI 应用实例。
 -   调用 `init_app_state` 将引擎客户端、配置等状态信息填充到 FastAPI 应用中。
--   调用 `self._serve_http()` 创建 Uvicorn 服务器的协程。
--   **新增**: 调用 `self._wait_and_warmup()` 创建服务预热的协程。
--   **核心变更**: 使用 `asyncio.gather` 并发地运行服务器协程和预热协程。这意味着服务器启动的同时，预热逻辑会开始运行。
+-   **任务编排**:
+    1.  创建并启动 Uvicorn 服务器任务 (`server_task`)。
+    2.  `await` `self._wait_and_warmup()`，等待服务器完成模型加载并响应健康检查。这确保了服务在进入下一步前已基本就绪。
+    3.  **在预热成功后**，创建并启动持续健康检查任务 (`health_check_task`)。
+    4.  使用 `asyncio.wait` 同时监控 `server_task` 和 `health_check_task`。任何一个任务的意外退出（例如，引擎崩溃或服务无响应）都会导致另一个任务被取消，从而触发整个后端的优雅关闭。
 
 ### 3.6. `_serve_http(self, ...)`
 
@@ -97,13 +99,24 @@
 
 ### 3.7. `async _wait_and_warmup(self)` (新增)
 
-这是为实现服务就绪通知和预热而新增的关键方法。
--   **等待服务启动**: 在一个循环中，定期（例如每秒）尝试访问 vLLM 服务的 `/health` 健康检查接口。
--   **处理超时**: 如果在设定的超时时间（例如2分钟）内服务仍未变为健康状态，则认为启动失败，记录错误并取消主服务任务。
--   **设置就绪事件**: 一旦健康检查成功，就调用 `self.server_ready.set()`。这会释放所有在 `await self.wait_for_server_ready()` 处等待的协程，标志着服务已完全准备好。
--   **(可选)发送预热请求**: 可以在健康检查成功后，向 `/v1/completions` 或其他端点发送一个简单的推理请求，以确保模型和相关CUDA上下文已完全加载到GPU，从而避免第一个真实用户请求的延迟。
+该方法负责**等待 vLLM 服务器完成初始加载**。对于大型模型，这个过程可能需要数分钟。
+-   **等待服务启动**: 在一个无限循环中，使用 `aiohttp` 异步地、定期（每5秒）尝试访问 vLLM 服务的 `/health` 健康检查接口。
+-   **成功返回**: 一旦 `/health` 接口返回 200 状态码，意味着模型已加载，服务器已准备好接收请求。此时，方法将打印成功信息并正常返回。
+-   **持续等待**: 如果连接失败或返回非 200 状态码，它会静默地继续等待，直到服务就绪。这取代了旧的固定超时机制，以适应不同规模模型的加载时间。
+-   **移除就绪事件**: 该方法不再使用 `server_ready` 事件，其完成本身就标志着服务已准备好进入下一个阶段（持续健康监控）。
 
-### 3.8. `cleanup(self)`
+### 3.8. `async _health_check_monitor(self)` (新增)
+
+这个协程在服务器**初始预热成功后**启动，负责对 vLLM 引擎进行**持续的健康监控**。
+-   **启动时机**: 在 `_wait_and_warmup` 成功返回后才启动，避免在模型加载期间进行不必要的检查。
+-   **移除了初始等待**: 之前版本中固定的15秒等待 (`asyncio.sleep(15)`) 已被移除，监控会立即开始。
+-   **监控机制**: 在一个无限循环中，每 5 秒执行一次检查。
+-   **RPC 存活检查**: 通过调用 `self.engine_client.is_sleeping()` 方法进行 RPC 调用。这是一个轻量级的检查，用于确认 vLLM 的工作进程是否仍在运行且能够响应请求。
+-   **超时处理**: 如果 RPC 调用在 10 秒内没有响应 (`asyncio.TimeoutError`)，则认为引擎已无响应。
+-   **异常处理**: 任何来自存活检查的异常（包括超时）都会被捕获，并作为 `RuntimeError` 重新抛出。这会触发 `_run_server_worker` 中的 `asyncio.wait` 机制，导致整个服务关闭和重启。
+-   **日志降噪**: 为了避免在正常运行时产生过多日志，健康检查成功的 `print` 语句已被注释掉。
+
+### 3.9. `cleanup(self)`
 
 负责在服务停止后进行优雅的资源清理。
 -   **触发关闭事件**: 如果 `self.server_shutdown_event` (即 `uvicorn.Server.should_exit`) 存在且未被设置，则调用 `.set()` 来通知 Uvicorn 服务器开始关闭流程。
@@ -215,12 +228,28 @@ class VLLMBackend(BaseBackend):
 
             print(f"INFO:     Starting vLLM server on {listen_address}")
             
-            # Create server and warmup coroutines.
-            server_coro = self._serve_http(sock=sock)
-            warmup_coro = self._wait_and_warmup()
-
-            # Concurrently run the server and the warmup process.
-            await asyncio.gather(server_coro, warmup_coro)
+            # 1. Create a task for the Uvicorn server.
+            server_task = asyncio.create_task(self._serve_http(sock=sock))
+            
+            # 2. Wait for the model to load and the server to be ready.
+            await self._wait_and_warmup()
+            
+            # 3. Once ready, start the continuous health check monitor.
+            health_check_task = asyncio.create_task(self._health_check_monitor())
+            
+            # 4. Monitor both tasks. If one fails, the other is cancelled.
+            pending = {server_task, health_check_task}
+            try:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    if task.exception():
+                        raise task.exception()
+            finally:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
     def _serve_http(self, sock: socket.socket) -> Coroutine:
         """
@@ -239,31 +268,38 @@ class VLLMBackend(BaseBackend):
 
     async def _wait_and_warmup(self):
         """
-        Waits for the server to be healthy and then sets the ready event.
+        Waits for the server to become healthy after initial startup.
+        This may take a long time for large models to load.
         """
-        health_url = f"http://{self.vllm_args.host}:{self.vllm_args.port}/health"
+        health_url = f"http://{self.vllm_args.host or 'localhost'}:{self.vllm_args.port}/health"
+        print("INFO:     Waiting for model to load. This may take a while...")
 
-        # Loop until the server is healthy or timeout is reached.
-        for _ in range(120): # 2-minute timeout
-            await asyncio.sleep(1)
+        while True:
+            await asyncio.sleep(5)
             try:
-                # Attempt to connect to the health check endpoint.
-                res = requests.get(health_url, timeout=5)
-                if res.status_code == 200:
-                    print("INFO:     vLLM server is healthy.")
-                    # (Optional) Send a warmup inference request here.
-                    # ...
-                    print("INFO:     vLLM backend is warmed up and ready to roll!")
-                    self.server_ready.set() # Signal that the server is ready.
-                    return
-            except requests.exceptions.RequestException:
-                # Ignore connection errors while waiting for the server to start.
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(health_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            print("INFO:     vLLM server is healthy.")
+                            return
+            except aiohttp.ClientError:
+                # This is expected if the server is not up yet.
                 pass
-        
-        # If the loop completes without success, fail fast.
-        print("ERROR:    vLLM server failed to start after 2 minutes.")
-        if self.server_task:
-            self.server_task.cancel() # Cancel the main server task.
+
+    async def _health_check_monitor(self):
+        """
+        Monitors the health of the vLLM engine continuously after startup.
+        """
+        while True:
+            await asyncio.sleep(5)
+            try:
+                # Use a lightweight RPC check to see if the engine is responsive.
+                await asyncio.wait_for(self.engine_client.is_sleeping(), timeout=10.0)
+                # print("INFO:     vLLM engine is healthy.") # Commented out to reduce log spam.
+            except asyncio.TimeoutError:
+                raise RuntimeError("vLLM engine is unresponsive.")
+            except Exception as e:
+                raise RuntimeError(f"vLLM engine health check failed: {e}")
 
     def cleanup(self):
         """

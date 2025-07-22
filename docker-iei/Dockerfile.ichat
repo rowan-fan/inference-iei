@@ -6,4 +6,6 @@ WORKDIR /app
 
 ADD ./ichat /app/ichat
 
+RUN pip install --no-deps /app/ichat/sglang_whls/*.whl
+
 # CMD ["python", "ichat/serve.py"]
