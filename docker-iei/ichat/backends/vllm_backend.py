@@ -178,13 +178,15 @@ class VLLMBackend(BaseBackend):
 
             print(f"INFO:     Starting vLLM server on {listen_address}")
 
-            # Create coroutines for the server and the health check
+            # Create a coroutine for the server.
             server_task = asyncio.create_task(self._serve_http(sock=sock, **uvicorn_kwargs))
-            health_check_task = asyncio.create_task(self._health_check_monitor())
             
             # The warmup must complete before we can consider the server fully running.
             # It needs the server task to be running in the background.
             await self._wait_and_warmup()
+            
+            # Start the health check monitor only after the server is ready.
+            health_check_task = asyncio.create_task(self._health_check_monitor())
             
             # Now that warmup is done, we monitor the long-running server and health-check tasks.
             # If either one fails, we'll shut everything down.
@@ -216,36 +218,35 @@ class VLLMBackend(BaseBackend):
         if not self.engine_client:
             return
 
-        # The MQLLMEngineClient which holds the process handle is nested
-        # inside the AsyncLLMEngine.
-        mq_engine_client = getattr(self.engine_client, 'engine_client', None)
-        engine_process = getattr(mq_engine_client, '_engine_process', None)
+        # The client holding the process handle is nested. The attribute name
+        # might be 'engine' or 'engine_client' depending on the vLLM version.
+        # client_with_proc = getattr(self.engine_client, 'engine', None) or \
+        #                    getattr(self.engine_client, 'engine_client', None)
+        # engine_process = getattr(client_with_proc, '_engine_process', None)
 
-        if not isinstance(engine_process, psutil.Process):
-            print("WARN:     Could not get vLLM engine process object. "
-                  "Health checks will rely on RPC timeouts.")
-            engine_process = None
-
-        await asyncio.sleep(15)
+        # if not isinstance(engine_process, psutil.Process):
+        #     print("WARN:     Could not get vLLM engine process object. "
+        #           "Health checks will rely on RPC timeouts.")
+        #     engine_process = None
 
         while True:
             await asyncio.sleep(5)
             try:
                 # Priority 1: Direct process check using psutil. This is the most
                 # reliable and fastest way to detect if the worker was killed.
-                if engine_process:
-                    if not engine_process.is_running() or \
-                       engine_process.status() == psutil.STATUS_ZOMBIE:
-                        raise RuntimeError("vLLM worker process is not running or is a zombie.")
+                # if engine_process:
+                #     if not engine_process.is_running() or \
+                #        engine_process.status() == psutil.STATUS_ZOMBIE:
+                #         raise RuntimeError("vLLM worker process is not running or is a zombie.")
 
                 # Priority 2: Liveness check via RPC. This is for cases where
                 # the process is running but stuck (unresponsive).
                 await asyncio.wait_for(self.engine_client.is_sleeping(), timeout=10.0)
-                print("INFO:     vLLM engine is healthy.")
+                # print("INFO:     vLLM engine is healthy.")
 
-            except psutil.NoSuchProcess:
-                print("ERROR:    vLLM worker process no longer exists. Triggering shutdown.")
-                raise RuntimeError("vLLM worker process does not exist.")
+            # except psutil.NoSuchProcess:
+            #     print("ERROR:    vLLM worker process no longer exists. Triggering shutdown.")
+            #     raise RuntimeError("vLLM worker process does not exist.")
             
             except asyncio.TimeoutError:
                 print("ERROR:    vLLM engine is unresponsive (RPC timed out). Triggering shutdown.")
