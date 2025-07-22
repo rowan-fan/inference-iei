@@ -6,6 +6,7 @@ import requests
 import uvicorn
 import logging
 import aiohttp
+import psutil
 from argparse import ArgumentParser, Namespace
 from typing import Optional, Coroutine, List
 
@@ -44,6 +45,7 @@ class SGLangBackend(BaseBackend):
         self.tokenizer_manager = None
         self.server_task: Optional[asyncio.Task] = None
         self.server_shutdown_event: Optional[asyncio.Event] = None
+        self.subprocesses: List[psutil.Process] = []
 
     def _parse_sglang_args(self, backend_argv: List[str]) -> ServerArgs:
         """
@@ -88,6 +90,10 @@ class SGLangBackend(BaseBackend):
         The core logic to build and run the SGLang API server worker.
         This is an adaptation of SGLang's `launch_server` function.
         """
+        # 0. Get a list of child processes before launching new ones.
+        # This allows us to identify the SGLang-specific subprocesses later.
+        pre_launch_children = psutil.Process(os.getpid()).children()
+
         # 1. Launch SGLang engine subprocesses (Tokenizer, Scheduler, Detokenizer).
         (
             tokenizer_manager,
@@ -97,6 +103,11 @@ class SGLangBackend(BaseBackend):
         ) = _launch_subprocesses(server_args=self.sglang_args)
 
         self.tokenizer_manager = tokenizer_manager
+
+        # Store the newly created SGLang subprocesses for monitoring
+        post_launch_children = psutil.Process(os.getpid()).children()
+        self.subprocesses = [p for p in post_launch_children if p not in pre_launch_children]
+        logger.info(f"Detected {len(self.subprocesses)} SGLang subprocesses to monitor.")
 
         # 2. Set the global state required by SGLang's API endpoints.
         set_global_state(
@@ -135,8 +146,11 @@ class SGLangBackend(BaseBackend):
         # Once ready, start the continuous health check monitor.
         health_check_task = asyncio.create_task(self._health_check_monitor())
         
-        # Monitor both tasks. If one fails, the other is cancelled.
-        pending = {server_task, health_check_task}
+        # Start a separate monitor to check if subprocesses are alive.
+        process_monitor_task = asyncio.create_task(self._subprocess_monitor())
+        
+        # Monitor all tasks. If one fails, the others are cancelled.
+        pending = {server_task, health_check_task, process_monitor_task}
         try:
             done, pending = await asyncio.wait(
                 pending, return_when=asyncio.FIRST_COMPLETED
@@ -222,9 +236,20 @@ class SGLangBackend(BaseBackend):
     async def _health_check_monitor(self):
         """
         Monitors the health of the SGLang engine continuously after startup.
+        
+        This check is crucial for detecting if the underlying SGLang engine, which runs
+        in separate subprocesses, has crashed. A simple HTTP check to an endpoint like
+        `/get_model_info` is insufficient because the main FastAPI server can remain
+        responsive even when its worker processes have failed.
+
+        To solve this, we use the `/health_generate` endpoint. This endpoint triggers a
+        minimal end-to-end inference request (generating a single token). If this request
+        fails or times out, it indicates a genuine problem with the inference engine,
+        allowing the backend to detect the failure and shut down properly.
         """
         headers = {}
-        health_url = self.sglang_args.url() + "/get_model_info"
+        # Use `/health_generate` for a comprehensive check, not `/get_model_info`.
+        health_url = self.sglang_args.url() + "/health_generate"
         if self.sglang_args.api_key:
             headers["Authorization"] = f"Bearer {self.sglang_args.api_key}"
 
@@ -232,7 +257,10 @@ class SGLangBackend(BaseBackend):
             while True:
                 await asyncio.sleep(10)
                 try:
-                    async with session.get(health_url, timeout=5, headers=headers) as resp:
+                    # The timeout for the health check is handled internally by the SGLang
+                    # `/health_generate` endpoint (20s), so we set a slightly larger
+                    # timeout here to catch network issues or a completely hung server.
+                    async with session.get(health_url, timeout=30, headers=headers) as resp:
                         if resp.status != 200:
                             logger.error(f"SGLang health check returned status {resp.status}.")
                             raise RuntimeError(f"SGLang health check failed.")
@@ -240,16 +268,40 @@ class SGLangBackend(BaseBackend):
                     logger.error(f"SGLang engine is unresponsive: {e}")
                     raise RuntimeError("SGLang engine is unresponsive.") from e
 
+    async def _subprocess_monitor(self):
+        """
+        Monitors the health of SGLang subprocesses directly.
+
+        This provides a more robust way to detect worker failures than HTTP checks,
+        as it directly verifies if the underlying processes are running. If any
+        of the essential SGLang subprocesses (e.g., scheduler, detokenizer) die,
+        this monitor will detect it and trigger a server shutdown.
+        """
+        while True:
+            await asyncio.sleep(5)
+            for proc in self.subprocesses:
+                if not proc.is_running():
+                    logger.error(f"SGLang subprocess with PID {proc.pid} has terminated unexpectedly.")
+                    raise RuntimeError("A critical SGLang subprocess has failed.")
+
     def cleanup(self):
         """
         Gracefully cleans up all server resources.
         """
         logger.info("Cleaning up SGLang backend resources...")
-        if self.server_shutdown_event and not self.server_shutdown_event.is_set():
-            self.server_shutdown_event.set()
-
-        if self.server_task and not self.server_task.done():
-            self.server_task.cancel()
         
-        # SGLang's launch_server uses this to kill all subprocesses
-        kill_process_tree(os.getpid(), include_parent=False)
+        # SGLang's launch_server uses this to kill all subprocesses.
+        # We also need to call it to ensure all child processes are terminated.
+        # Giving a small delay after shutting down the server seems to allow
+        # for a more graceful exit.
+        try:
+            if self.server_shutdown_event and not self.server_shutdown_event.is_set():
+                logger.info("Requesting Uvicorn server to shut down.")
+                self.server_shutdown_event.set()
+
+            if self.server_task and not self.server_task.done():
+                self.server_task.cancel()
+        finally:
+            # This is the most reliable way to ensure all spawned processes are cleaned up.
+            logger.info("Killing SGLang process tree...")
+            kill_process_tree(os.getpid(), include_parent=False)
