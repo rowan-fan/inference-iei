@@ -1,25 +1,23 @@
-# docker-iei/ichat/serve.py
 
 import asyncio
 import signal
 from contextlib import asynccontextmanager
-from typing import Any, Tuple
+from typing import Any
 from argparse import Namespace
-import logging
 
 # Assume that the execution environment is configured so that 'ichat' is a package.
 # This allows for consistent relative imports within the application.
 try:
-    from .config.args import parse_worker_args
-    from .monitor.heartbeat import HeartbeatManager
-    from .utils.logger import setup_logging
-    from .backends.base_backend import BaseBackend
+    from .args import parse_worker_args
+    from .heartbeat import HeartbeatManager
+    from ..utils.logger import setup_logging
+    from ..backends.base_backend import BaseBackend
 except ImportError as e:
     # Provide a helpful error message if modules can't be found,
     # often due to incorrect execution context.
     print("ERROR: Failed to import modules. This script is designed to be run as a Python module.")
     print("Please run it from the parent directory of 'ichat', for example:")
-    print("  python3 -m ichat.serve [arguments]")
+    print("  python3 -m ichat.worker [arguments]")
     print(f"Original ImportError: {e}")
     # Exit since the application cannot start without its core components.
     exit(1)
@@ -83,10 +81,10 @@ async def main() -> None:
 
     # 3. Dynamically instantiate the specified inference backend.
     if framework_args.backend == "vllm":
-        from .backends.vllm_backend import VLLMBackend
+        from ..backends.vllm_backend import VLLMBackend
         backend = VLLMBackend(framework_args, backend_argv, backend_ready_event)
     elif framework_args.backend == "sglang":
-        from .backends.sglang_backend import SGLangBackend
+        from ..backends.sglang_backend import SGLangBackend
         backend = SGLangBackend(framework_args, backend_argv, backend_ready_event)
     else:
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
@@ -147,4 +145,4 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Suppress exceptions that are expected during a graceful shutdown.
         print("INFO:     Main task cancelled. Exiting.")
-        pass
+        pass 

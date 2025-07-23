@@ -1,5 +1,3 @@
-# docker-iei/ichat/monitor/heartbeat.py
-
 import asyncio
 import uuid
 from argparse import Namespace
@@ -162,4 +160,4 @@ class HeartbeatManager:
         if self._session:
             await self._session.close()
 
-        print("INFO:     Heartbeat manager stopped.")
+        print("INFO:     Heartbeat manager stopped.") 

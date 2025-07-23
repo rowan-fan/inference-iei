@@ -28,7 +28,7 @@ from vllm.utils import (FlexibleArgumentParser, is_valid_ipv6_address,
 from vllm._version import __version__ as VLLM_VERSION
 
 from .base_backend import BaseBackend
-from .. import serve
+from .. import worker as worker_module
 
 
 class VLLMBackend(BaseBackend):
