@@ -161,7 +161,6 @@ class WorkerManager:
         }
         backend_args = {k: v for k, v in config.items() if k not in known_config_keys}
         if backend_args:
-            cmd.append("--")
             for key, value in backend_args.items():
                 cmd.extend([f"--{key.replace('_', '-')}", str(value)])
         

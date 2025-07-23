@@ -89,33 +89,15 @@ class VLLMBackend(BaseBackend):
         # 3. Parse the backend-specific arguments
         vllm_args, _ = parser.parse_known_args(backend_argv)
 
-        # 4. Merge framework arguments into vllm_args FIRST.
-        # This ensures that framework-level settings like model_path are available
-        # before we try to map them to vLLM's internal argument names.
-        for key, value in vars(self.framework_args).items():
-            # Only set the attribute if it's not already set by backend_argv
-            # and the value from framework_args is not None.
-            # This allows framework-level arguments to override backend defaults.
-            if hasattr(vllm_args, key) and value is not None:
-                setattr(vllm_args, key, value)
-
-        # 5. Map iChat unified argument names to vLLM expected names
-        # As per serve.md, --model-path -> --model
-        if hasattr(vllm_args, 'model_path') and vllm_args.model_path:
+        # 4. Apply mappings from iChat's unified args to vLLM's native args
+        # If the user provided an iChat-specific argument, its value is mapped
+        # to the corresponding vLLM argument.
+        if vllm_args.model_path is not None:
             vllm_args.model = vllm_args.model_path
-        
-        # As per serve.md, --tokenizer-path -> --tokenizer
-        if hasattr(vllm_args, 'tokenizer_path') and vllm_args.tokenizer_path:
-            vllm_args.tokenizer = vllm_args.tokenizer_path
 
-        # As per serve.md, --context-length -> --max-model-len
-        if hasattr(vllm_args, 'context_length') and vllm_args.context_length:
+        if vllm_args.context_length is not None:
             vllm_args.max_model_len = vllm_args.context_length
-            
-        # Ensure served_model_name is a list for vLLM
-        if hasattr(vllm_args, 'served_model_name') and isinstance(vllm_args.served_model_name, str):
-            vllm_args.served_model_name = [vllm_args.served_model_name]
-
+        
         return vllm_args
 
     def get_backend_args(self) -> Namespace:

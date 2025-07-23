@@ -1,17 +1,21 @@
 import asyncio
 from argparse import Namespace
 from typing import List
+import logging
 
+logger = logging.getLogger(__name__)
 
 class BaseBackend:
     """
     Base class for all backend implementations (e.g., vLLM, SGLang).
     """
 
-    def __init__(self, framework_args: Namespace, backend_argv: List[str]):
+    def __init__(self, framework_args: Namespace, backend_argv: List[str]):      
+        logger.info("Initializing base backend server...")
         self.framework_args = framework_args
         self.backend_argv = backend_argv
-        self.server_ready = asyncio.Event()
+        logger.info("Initialized base backend server...")
+        # self.server_ready = asyncio.Event()
 
     async def run(self):
         """

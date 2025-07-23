@@ -5,6 +5,7 @@ import signal
 from contextlib import asynccontextmanager
 from typing import Any, Tuple
 from argparse import Namespace
+import logging
 
 # Assume that the execution environment is configured so that 'ichat' is a package.
 # This allows for consistent relative imports within the application.
@@ -77,7 +78,7 @@ async def main() -> None:
 
     # 2. Set up logging.
     setup_logging(log_level=framework_args.log_level)
-
+    logger = logging.getLogger(__name__)
     # Backend-ready event to coordinate with the heartbeat manager.
     backend_ready_event = asyncio.Event()
 
@@ -87,7 +88,9 @@ async def main() -> None:
         backend = VLLMBackend(framework_args, backend_argv, backend_ready_event)
     elif framework_args.backend == "sglang":
         from .backends.sglang_backend import SGLangBackend
+        logger.info(f"framework_args: {framework_args}")
         backend = SGLangBackend(framework_args, backend_argv, backend_ready_event)
+        logger.info(f"backend_argv: {backend_argv}")
     else:
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
 

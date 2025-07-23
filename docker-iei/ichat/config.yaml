@@ -9,7 +9,7 @@ server_settings:
 managed_workers:
   - model_name: qwen
     model_path: /mnt/models/Qwen3-1.7B
-    backend: vllm
+    backend: sglang
     gpu_ids: [0]
     port: 8001
     heartbeat_interval: 10

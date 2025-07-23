@@ -43,17 +43,19 @@ class SGLangBackend(BaseBackend):
         """
         Initializes the backend and prepares SGLang arguments.
         """
+        logger.info("Initializing SGLang backend server...")
         super().__init__(framework_args, backend_argv)
         self.server_ready = backend_ready_event
-        self.sglang_args: ServerArgs = self._parse_sglang_args(backend_argv)
-
+        logger.info("preparing SGLang backend server...")
+        self.sglang_args: ServerArgs = self._parse_sglang_args(framework_args, backend_argv)
+        logger.info(f"sglang_args: {self.sglang_args}")
         self.app = None
         self.tokenizer_manager = None
         self.server_task: Optional[asyncio.Task] = None
         self.server_shutdown_event: Optional[asyncio.Event] = None
         self.subprocesses: List[psutil.Process] = []
 
-    def _parse_sglang_args(self, backend_argv: List[str]) -> ServerArgs:
+    def _parse_sglang_args(self, framework_args: Namespace,  backend_argv: List[str]) -> ServerArgs:
         """
         Parses SGLang-specific arguments from the command line.
         """
@@ -61,15 +63,8 @@ class SGLangBackend(BaseBackend):
         ServerArgs.add_cli_args(parser)
 
         # 1. Parse the backend-specific arguments passed from the command line
-        sglang_cli_args = parser.parse_args(backend_argv)
-
-        # 2. Merge framework-level arguments (like host, port) into the SGLang args.
-        # Framework arguments take precedence if they are also defined for SGLang.
-        for key, value in vars(self.framework_args).items():
-            if hasattr(sglang_cli_args, key) and value is not None:
-                setattr(sglang_cli_args, key, value)
-        
-        # 3. Create the final ServerArgs instance from the combined arguments
+        sglang_cli_args, _ = parser.parse_known_args(backend_argv)
+        # 2. Create the final ServerArgs instance from the combined arguments
         server_args = ServerArgs.from_cli_args(sglang_cli_args)
         server_args.check_server_args()
         
@@ -103,7 +98,7 @@ class SGLangBackend(BaseBackend):
         # 0. Get a list of child processes before launching new ones.
         # This allows us to identify the SGLang-specific subprocesses later.
         pre_launch_children = psutil.Process(os.getpid()).children()
-
+        logger.info(f"self.sglang_args: {self.sglang_args}")
         # 1. Launch SGLang engine subprocesses (Tokenizer, Scheduler, Detokenizer).
         (
             tokenizer_manager,
