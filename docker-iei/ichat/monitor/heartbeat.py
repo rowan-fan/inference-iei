@@ -53,6 +53,7 @@ class HeartbeatManager:
         self._session: Optional[aiohttp.ClientSession] = None
         self._should_stop = asyncio.Event()
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self.state = "initializing"
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Lazily creates and returns the aiohttp ClientSession."""
@@ -87,16 +88,26 @@ class HeartbeatManager:
             print("WARNING:  Gateway heartbeat request timed out.")
 
     async def _heartbeat_loop(self):
-        """The main loop that periodically sends heartbeats."""
-        # Wait until the backend signals that it is ready.
-        # This prevents the worker from being registered at the gateway
-        # before the model is loaded, which would cause requests to fail.
-        print("INFO:     Heartbeat service waiting for backend to be ready...")
-        await self.backend_ready.wait()
-        print("INFO:     Backend is ready. Starting heartbeat loop.")
+        """
+        The main loop that periodically sends heartbeats.
+        It starts by sending 'initializing' state, then switches to 'ready'
+        once the backend signals it's ready.
+        """
+        print("INFO:     Heartbeat service started. Will send initial heartbeats as 'initializing'.")
+
+        async def wait_for_backend_ready():
+            """Waits for the backend to be ready and updates the state."""
+            try:
+                await self.backend_ready.wait()
+                self.state = "ready"
+                print("INFO:     Backend is ready. Heartbeats will now be sent with state 'ready'.")
+            except asyncio.CancelledError:
+                pass # This is expected on shutdown
+
+        ready_waiter_task = asyncio.create_task(wait_for_backend_ready())
 
         while not self._should_stop.is_set():
-            await self._send_heartbeat(state="ready")
+            await self._send_heartbeat(state=self.state)
             try:
                 # Wait for the specified interval, but break immediately if
                 # a stop signal is received.
@@ -106,12 +117,13 @@ class HeartbeatManager:
             except asyncio.TimeoutError:
                 # This is the expected behavior, triggering the next heartbeat.
                 pass
+        
+        ready_waiter_task.cancel()
 
     async def start(self):
         """
-        Starts the heartbeat service. It first registers the worker in an
-        'initializing' state, then runs the heartbeat loop in a background task
-        which will switch the state to 'ready' once the backend is available.
+        Starts the heartbeat service. It runs the heartbeat loop in a background
+        task, which will manage the worker's state transitions.
         """
         if not self.gateway_address:
             print("INFO:     Gateway address not provided. Heartbeat service disabled.")
@@ -119,15 +131,21 @@ class HeartbeatManager:
 
         print(f"INFO:     Starting heartbeat service for worker {self.payload['worker_id']}.")
 
-        # Pre-register worker as initializing. This is a fire-and-forget call.
-        asyncio.create_task(self._send_heartbeat(state="initializing"))
-
+        # The loop now handles all state transitions internally.
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def stop(self):
-        """Stops the heartbeat manager gracefully."""
-        if self._should_stop.is_set():
+        """
+        Stops the heartbeat manager gracefully, sending a final 'terminating'
+        heartbeat before shutting down.
+        """
+        if self._should_stop.is_set() or not self._heartbeat_task:
             return
+
+        # Send a final heartbeat to notify the gateway of graceful shutdown
+        self.state = "terminating"
+        print(f"INFO:     Sending final heartbeat for worker {self.payload['worker_id']} with state 'terminating'...")
+        await self._send_heartbeat(state=self.state)
 
         print("INFO:     Signaling heartbeat loop to stop...")
         self._should_stop.set()

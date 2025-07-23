@@ -87,6 +87,87 @@
 
 这种设计实现了灵活性和标准化的平衡：用户可以立即使用任何后端支持的最新参数，而无需等待 iChat 框架进行更新；同时，对于最核心的配置，又提供了一致和简化的体验。
 
+### 3.5. 参数解析实现细节
+
+iChat Worker 的参数解析由 `config/args.py` 的 `parse_worker_args()` 函数实现，具备如下特点：
+
+- **框架参数与后端参数分离**：
+  - 只解析 iChat 框架自身参数（如 `--backend`, `--gateway-address`, `--heartbeat-interval`, `--log-level`, `--host`, `--port`, `--served-model-name`, `--model-path` 等）。
+  - 采用 `argparse.ArgumentParser`，通过 `parse_known_args()` 方法，将未被识别的参数（如后端专属参数）收集到 `backend_argv` 列表中。
+- **共享参数的回传机制**：
+  - 某些参数（如 `--host`, `--port`, `--served-model-name`, `--model-path`）既被框架使用，也需传递给后端。
+  - 框架解析后，会检查这些参数是否已在 `backend_argv` 中出现，若未出现则自动补充，确保后端参数解析器也能获取到。
+  - 这样避免了参数被“吃掉”导致后端无法获取的情况。
+- **返回值**：
+  - 返回 `(framework_args, backend_argv)`，前者为 `Namespace`，后者为字符串列表。
+  - 后端实例化时会收到这两个参数，后端可用自己的 `ArgumentParser` 进一步解析 `backend_argv`。
+
+**示例代码片段（伪代码）**：
+```python
+framework_args, backend_argv = parser.parse_known_args(args=sys.argv[1:])
+# 补充共享参数
+for arg_dest, arg_flag in shared_args.items():
+    arg_value = getattr(framework_args, arg_dest, None)
+    if arg_value is not None and not any(arg.startswith(arg_flag) for arg in backend_argv):
+        backend_argv.extend([arg_flag, str(arg_value)])
+```
+
+这种机制保证了参数的灵活透传和一致性，便于后端扩展和自定义参数。
+
+### 3.6. 心跳检测机制实现细节
+
+心跳检测由 `monitor/heartbeat.py` 的 `HeartbeatManager` 类实现，主要负责 Worker 与 Gateway 的注册与健康状态上报，实现了完整的生命周期管理。
+
+- **初始化**：
+  - 需要 `framework_args`（框架参数）、`backend_args`（后端最终解析参数）、`backend_ready`（后端就绪事件）。
+  - `payload` 结构包含 worker 唯一 ID、模型名、模型路径、后端类型、host、port 等。
+  - 初始状态被设置为 `state="initializing"`。
+
+- **持续心跳与状态流转**：
+  - `HeartbeatManager` 启动后，会立即进入一个**持续的心跳循环**。
+  - **`initializing`**: 循环开始时，会以 `state="initializing"` 周期性发送心跳。这向 Gateway 表明 Worker 正在启动，但尚未准备好处理请求。
+  - **`ready`**: 同时，一个并行的后台任务会等待 `backend_ready` 事件。一旦后端服务（如模型加载）完成并设置该事件，心跳状态会自动切换到 `state="ready"`。后续的心跳将使用此新状态。
+  - 这种设计确保了 Worker 的健康状况被持续监控，同时其可用性状态也能被精确地传达给 Gateway。
+
+- **心跳发送实现**：
+  - 采用 `aiohttp` 异步 HTTP 客户端，向 Gateway 的 `/v1/workers/heartbeat` 端点 POST 心跳包。
+  - 若发送失败或超时，会打印警告但不会中断主流程。
+
+- **优雅关闭与最终状态**：
+  - 当 `HeartbeatManager.stop()` 被调用时（在 `serve.py` 的优雅关闭流程中），它会执行以下关键操作：
+    1.  **发送 `terminating` 状态**: 立即发送一次**最后的心跳**，其状态为 `state="terminating"`。这会明确通知 Gateway 该 Worker 正在正常下线，应立即从服务列表中移除。
+    2.  **停止循环**: 设置内部停止事件，终止心跳循环。
+    3.  **资源清理**: 关闭 aiohttp session，并确保任务被正确取消。
+
+- **与后端协作**：
+  - 通过 `backend_ready`（`asyncio.Event`）与后端解耦，`HeartbeatManager` 能够独立运行，并在不阻塞主心跳循环的情况下，响应后端就绪的事件。这确保了状态转换的及时性和准确性。
+
+**伪代码流程**：
+```python
+# HeartbeatManager.start()
+self.state = "initializing"
+self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+# _heartbeat_loop() 内部
+ready_waiter_task = asyncio.create_task(self._wait_for_backend_ready())
+while not self._should_stop.is_set():
+    await self._send_heartbeat(state=self.state) # 发送当前状态的心跳
+    try:
+        # 等待间隔或停止信号
+        await asyncio.wait_for(self._should_stop.wait(), timeout=self.heartbeat_interval)
+    except asyncio.TimeoutError:
+        pass # 正常超时，继续下一次心跳
+
+# _wait_for_backend_ready() 内部
+await self.backend_ready.wait()
+self.state = "ready" # 后端就绪，更新状态
+
+# HeartbeatManager.stop()
+await self._send_heartbeat(state="terminating") # 发送最后的心跳
+self._should_stop.set() # 停止循环
+```
+
+该机制确保了 Worker 生命周期内的健康状态可观测、可追踪，并与后端实际可用性严格同步。
 
 ## 4. 执行流程
 

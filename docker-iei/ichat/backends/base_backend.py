@@ -10,12 +10,9 @@ class BaseBackend:
     Base class for all backend implementations (e.g., vLLM, SGLang).
     """
 
-    def __init__(self, framework_args: Namespace, backend_argv: List[str]):      
-        logger.info("Initializing base backend server...")
+    def __init__(self, framework_args: Namespace, backend_argv: List[str]): 
         self.framework_args = framework_args
         self.backend_argv = backend_argv
-        logger.info("Initialized base backend server...")
-        # self.server_ready = asyncio.Event()
 
     async def run(self):
         """

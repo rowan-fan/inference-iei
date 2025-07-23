@@ -26,21 +26,56 @@ class ServiceRegistry:
     This class is thread-safe.
     """
 
-    def __init__(self, heartbeat_timeout: int = 30):
+    def __init__(self, heartbeat_timeout: int = 30, worker_manager: Optional["WorkerManager"] = None):
         self._workers: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
         self.heartbeat_timeout = heartbeat_timeout
+        self.worker_manager = worker_manager
+        self.managed_models = (
+            set(worker_manager.worker_configs.keys()) if worker_manager else set()
+        )
 
     def register_worker(self, **kwargs: Any) -> None:
         """
         Registers or updates a worker's information and heartbeat.
-        This method is designed to be "upsert" - it adds a new worker
-        or updates an existing one.
+        A worker sending a 'terminating' state will be removed, and if it's
+        a managed worker, a restart will be triggered.
         """
         worker_id = kwargs.get("worker_id")
         if not worker_id:
             return
 
+        state = kwargs.get("state")
+
+        if state == "terminating":
+            with self._lock:
+                # If it's a managed worker that is terminating, we keep it in the registry
+                # with a 'terminating' state. This prevents a race condition where a client
+                # might see a model as unavailable because the old worker is gone but the
+                # new one hasn't registered yet. The unhealthy worker check will clean it up.
+                if worker_id in self._workers:
+                    worker_info = self._workers[worker_id]
+                    model_name = worker_info.get("model_name")
+                    is_managed = self.worker_manager and model_name in self.managed_models
+
+                    if is_managed:
+                        # For managed workers, update state to 'terminating'.
+                        # The old worker entry will be replaced when the new one registers.
+                        self._workers[worker_id]["state"] = "terminating"
+                        self._workers[worker_id]["last_heartbeat"] = time.time()
+                        print(f"INFO:     Managed worker {worker_id} ({model_name}) sent 'terminating' state. Awaiting restart.")
+                    else:
+                        # For unmanaged workers, remove immediately.
+                        self._workers.pop(worker_id)
+                        print(f"INFO:     Unmanaged worker {worker_id} ({model_name}) sent 'terminating' state. Removing from registry.")
+                    
+                    # Trigger restart for managed workers regardless.
+                    if is_managed:
+                        print(f"INFO:     Attempting to restart managed worker for model '{model_name}'...")
+                        asyncio.create_task(self.worker_manager.start_worker(model_name))
+            return
+
+        # For any other state ("initializing", "ready"), perform an "upsert" operation.
         with self._lock:
             self._workers[worker_id] = {
                 **kwargs,
@@ -50,19 +85,34 @@ class ServiceRegistry:
     async def check_unhealthy_workers(self) -> None:
         """
         Periodically checks for and removes workers that have missed heartbeats.
+        If a managed worker times out, it will be restarted.
         """
         while True:
             await asyncio.sleep(self.heartbeat_timeout)
+            
+            unhealthy_workers = {}
             with self._lock:
                 now = time.time()
-                unhealthy_workers = [
+                # Find timed-out workers
+                timed_out_ids = [
                     worker_id
                     for worker_id, worker in self._workers.items()
                     if now - worker.get("last_heartbeat", 0) > self.heartbeat_timeout
                 ]
-                for worker_id in unhealthy_workers:
-                    print(f"INFO:     Worker {worker_id} timed out. Removing from registry.")
-                    del self._workers[worker_id]
+                # Atomically remove them and get their info
+                for worker_id in timed_out_ids:
+                    unhealthy_workers[worker_id] = self._workers.pop(worker_id)
+
+            # Process unhealthy workers outside the lock
+            for worker_id, worker_info in unhealthy_workers.items():
+                model_name = worker_info.get("model_name")
+                print(f"INFO:     Worker {worker_id} ({model_name}) timed out. Removing from registry.")
+                
+                # If it's a managed worker, request a restart.
+                if self.worker_manager and model_name in self.managed_models:
+                    print(f"INFO:     Worker for managed model '{model_name}' timed out. Attempting to restart...")
+                    # The restart is fire-and-forget from the perspective of the health check loop.
+                    asyncio.create_task(self.worker_manager.start_worker(model_name))
 
     def get_worker_for_model(self, model_name: str) -> Optional[Dict[str, Any]]:
         """Finds a ready worker that serves a given model."""
@@ -85,43 +135,71 @@ class WorkerManager:
     """
     Manages the lifecycle of workers defined in the config file.
     It starts them as subprocesses and ensures they are terminated gracefully.
+    It can also restart workers that have failed.
     """
 
     def __init__(self, worker_configs: List[Dict[str, Any]], gateway_address: str):
-        self.worker_configs = worker_configs
+        # Store configs in a dict for easy lookup by model_name
+        self.worker_configs = {cfg["model_name"]: cfg for cfg in worker_configs}
         self.gateway_address = gateway_address
-        self.processes: List[subprocess.Popen] = []
+        # Store running processes by model_name to track them
+        self.processes: Dict[str, subprocess.Popen] = {}
 
-    async def start_workers(self) -> None:
-        """
-        Starts all managed workers as subprocesses.
-        """
-        for config in self.worker_configs:
-            cmd = self._build_command(config)
-            print(f"INFO:     Launching worker with command: {' '.join(cmd)}")
-            try:
-                # Inherit parent environment and set/override CUDA_VISIBLE_DEVICES
-                env = os.environ.copy()
-                env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, config.get("gpu_ids", [])))
-                process = subprocess.Popen(cmd, env=env)
-                self.processes.append(process)
-            except Exception as e:
-                print(f"ERROR:    Failed to launch worker for {config['model_name']}: {e}")
+    async def start_worker(self, model_name: str):
+        """Launches a single worker subprocess based on its model name."""
+        if model_name not in self.worker_configs:
+            print(f"ERROR:    Cannot start worker. No configuration found for model '{model_name}'.")
+            return
+        
+        # If a process for this model is already tracked, wait for it to terminate
+        # before starting a new one. This handles the restart race condition.
+        if model_name in self.processes:
+            process = self.processes[model_name]
+            if process.poll() is None:
+                print(f"WARN:     Restart requested for model '{model_name}', but process {process.pid} still exists. Waiting for it to terminate...")
+                try:
+                    # Use asyncio.to_thread to avoid blocking the event loop while waiting.
+                    await asyncio.to_thread(process.wait, timeout=10)
+                    print(f"INFO:     Old process {process.pid} for model '{model_name}' has terminated.")
+                except subprocess.TimeoutExpired:
+                    print(f"ERROR:    Old process {process.pid} for model '{model_name}' did not terminate in time. Killing it.")
+                    process.kill()
+                    # Give it a moment to die after being killed.
+                    await asyncio.sleep(1)
+
+        config = self.worker_configs[model_name]
+        cmd = self._build_command(config)
+        print(f"INFO:     Launching worker for model '{model_name}' with command: {' '.join(cmd)}")
+        try:
+            # Inherit parent environment and set/override CUDA_VISIBLE_DEVICES
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, config.get("gpu_ids", [])))
+            process = subprocess.Popen(cmd, env=env)
+            self.processes[model_name] = process
+        except Exception as e:
+            print(f"ERROR:    Failed to launch worker for {config['model_name']}: {e}")
+
+    async def start_all_workers(self) -> None:
+        """Starts all managed workers as subprocesses."""
+        for model_name in self.worker_configs:
+            await self.start_worker(model_name)
 
     async def stop_workers(self) -> None:
         """
         Terminates all managed worker subprocesses.
         """
-        for process in self.processes:
-            process.terminate()
+        for process in list(self.processes.values()):
+            if process.poll() is None:
+                process.terminate()
         
         # Wait for processes to terminate
-        for process in self.processes:
-            try:
-                await asyncio.to_thread(process.wait, timeout=10)
-            except subprocess.TimeoutExpired:
-                print(f"WARN:     Worker process {process.pid} did not terminate gracefully. Killing.")
-                process.kill()
+        for process in list(self.processes.values()):
+            if process.poll() is None:
+                try:
+                    await asyncio.to_thread(process.wait, timeout=10)
+                except subprocess.TimeoutExpired:
+                    print(f"WARN:     Worker process {process.pid} did not terminate gracefully. Killing.")
+                    process.kill()
 
     def _build_command(self, config: Dict[str, Any]) -> List[str]:
         """
@@ -168,8 +246,8 @@ class WorkerManager:
 
 
 # --- Global State and Configuration ---
-service_registry = ServiceRegistry()
 worker_manager: Optional[WorkerManager] = None
+service_registry: ServiceRegistry
 
 
 # --- Pydantic Models for API Validation ---
@@ -197,7 +275,7 @@ async def lifespan(app: FastAPI):
 
     # Start managed workers if configured
     if worker_manager:
-        asyncio.create_task(worker_manager.start_workers())
+        asyncio.create_task(worker_manager.start_all_workers())
 
     try:
         yield
@@ -209,7 +287,10 @@ async def lifespan(app: FastAPI):
 
         # Cancel background tasks
         health_check_task.cancel()
-        await asyncio.gather(health_check_task, return_exceptions=True)
+        try:
+            await health_check_task
+        except asyncio.CancelledError:
+            pass
         
         print("INFO:     Gateway has shut down.")
 
@@ -303,7 +384,9 @@ async def get_models():
     registered_models = set()
     for _, worker_info in workers.items():
         model_name = worker_info.get("model_name")
-        if worker_info.get("state") == "ready" and model_name not in registered_models:
+        # Expose models that are either ready or in the process of initializing.
+        # This gives a more accurate view of service availability during startup or restarts.
+        if worker_info.get("state") in ["ready", "initializing"] and model_name not in registered_models:
             model_list.append(
                 {
                     "id": model_name,
@@ -319,7 +402,7 @@ async def get_models():
 
 def main():
     """Main entry point for the iChat Gateway."""
-    global worker_manager
+    global worker_manager, service_registry
 
     # 1. Parse command-line arguments
     parser = argparse.ArgumentParser(description="iChat Gateway Service")
@@ -343,7 +426,13 @@ def main():
     if "managed_workers" in config:
         worker_manager = WorkerManager(config["managed_workers"], gateway_address)
 
-    # 4. Run the server (LiteLLM router is no longer needed)
+    # 4. Initialize ServiceRegistry, passing worker_manager if it exists
+    service_registry = ServiceRegistry(
+        heartbeat_timeout=server_settings.get("heartbeat_timeout", 30),
+        worker_manager=worker_manager,
+    )
+
+    # 5. Run the server
     uvicorn.run(
         app,
         host=host,

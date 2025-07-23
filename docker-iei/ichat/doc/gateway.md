@@ -17,14 +17,14 @@
 
 - **关注点分离 (Separation of Concerns)**: Gateway 专注于网络路由、服务管理和 API 聚合，而 Worker 专注于模型推理。这种分离使得系统各组件职责清晰，易于独立扩展和维护。
 - **动态配置驱动 (Dynamic Configuration-Driven)**: Gateway 的核心行为，特别是模型路由表，是动态的。它通过服务注册中心实时更新，支持在不重启 Gateway 的情况下动态增删 Worker 和模型。
-- **高可用性与自愈 (High Availability & Self-healing)**: 通过心跳机制，Gateway 能够持续监控 Worker 的健康状况。当 Worker 心跳超时，Gateway 会自动将其从路由表中移除，防止请求被发送到故障节点。
+- **高可用性与自愈 (High Availability & Self-healing)**: 通过心跳机制，Gateway 能够持续监控 Worker 的健康状况。当 Worker 心跳超时，Gateway 会自动将其从路由表中移除，防止请求被发送到故障节点。对于由 Gateway 管理的 Worker，它还会尝试自动重启失败的节点，实现服务自愈。
 - **混合部署的灵活性 (Hybrid Deployment Flexibility)**: Gateway 的设计原生支持“自动管理”和“动态注册”两种模式的 Worker，为不同的部署场景（如开发测试、生产环境、分布式部署）提供了最大的灵活性。
-- **基于 LiteLLM (Built on LiteLLM)**: 充分利用 LiteLLM 强大的 API 兼容性和路由能力作为数据平面的基础，确保了对 OpenAI 生态系统的广泛兼容性。
+- **开放标准兼容**: 通过直接转发请求或未来集成 LiteLLM 等工具，确保对 OpenAI API 生态系统的广泛兼容性。
 - **中心化控制 (Centralized Control)**: 为管理员提供了一套统一的 RESTful API，使其能够从一个中心点查看和控制整个 LLM 服务集群。
 
 ## 3. `gateway.py` 核心架构
 
-Gateway 的架构是围绕一个中心化的 FastAPI 应用构建的，集成了服务注册、Worker 管理和 LiteLLM 路由等多个核心组件。
+Gateway 的架构是围绕一个中心化的 FastAPI 应用构建的，集成了服务注册、Worker 管理和请求路由等多个核心组件。
 
 ```mermaid
 graph TD
@@ -45,26 +45,25 @@ graph TD
         end
         
         subgraph "数据平面 (Data Plane)"
-            LiteLLMRouter["LiteLLM 路由器"]
+            Router["请求路由器"]
             OpenAI_API["OpenAI 兼容 API<br>(/v1/chat/completions, etc.)"]
         end
         
-        LogCollector["日志收集器"]
         Config["config.yaml"]
     end
 
     Client --> |请求 (model='x')| OpenAI_API
     Admin --> |管理操作| AdminAPI
     
-    OpenAI_API -- "查询路由" --> LiteLLMRouter
-    LiteLLMRouter -- "获取可用模型/Worker" --> Registry
-    LiteLLMRouter --> |转发请求| Worker
+    OpenAI_API -- "查询路由" --> Router
+    Router -- "获取可用Worker" --> Registry
+    Router --> |转发请求| Worker
     
     Worker --> |注册/心跳| WorkerAPI
     WorkerAPI -- "更新状态" --> Registry
     
-    Worker -.-> |SSE 日志流| LogCollector
-    
+    Registry -- "超时, 请求重启" --> WorkerManager
+
     AdminAPI -- "查询/控制" --> Registry
     AdminAPI -- "启动/停止" --> WorkerManager
     
@@ -76,23 +75,25 @@ graph TD
 ### 3.1. 主程序与配置加载
 
 - Gateway 由 `gateway.py` 启动，它需要一个 `--config` 参数指定 `config.yaml` 配置文件的路径。
-- 启动时，程序首先解析 YAML 文件，获取 `server_settings`, `managed_workers` 和 `litellm_settings` 等配置。
+- 启动时，程序首先解析 YAML 文件，获取 `server_settings` 和 `managed_workers` 等配置。
 
-### 3.2. 服务注册中心 (`monitor.registry.ServiceRegistry`)
+### 3.2. 服务注册中心 (`ServiceRegistry`)
 
 - 这是 Gateway 的核心组件之一，一个内存中的数据库，用于跟踪所有 Worker 的状态。
 - **功能**:
-    - **注册 (Register)**: 当 Worker 首次发送心跳时，将其元数据（模型名称、地址、端口、后端类型等）添加到注册表。
-    - **心跳 (Heartbeat)**: 更新现有 Worker 的最后活跃时间戳。
-    - **状态检查 (Health Check)**: 定期扫描所有 Worker，将心跳超时的 Worker 标记为 `unhealthy`。
-    - **路由表提供 (Provide Routing Table)**: 为 LiteLLM 动态提供一份健康的、可用的模型部署列表。
+    - **注册 (Register)**: 当 Worker 发送心跳时，将其元数据（模型名称、地址、端口、状态等）“更新或插入”到注册表。
+    - **状态处理 (State Handling)**:
+        - `initializing`/`ready`: Worker 正常运行中，更新其心跳时间戳。
+        - `terminating`: Worker 正在优雅关闭，立即从注册表中移除，无需等待超时。
+    - **健康检查与自愈 (Health Check & Self-healing)**: 后台任务定期扫描所有 Worker。如果一个 *managed worker* 心跳超时，`ServiceRegistry` 会主动通知 `WorkerManager` 对其进行重启，实现故障自愈。对于动态注册的 Worker，仅将其移除。
+    - **路由信息提供 (Provide Routing Info)**: 为请求路由器提供一份健康的、可用的 (`state='ready'`) Worker 列表。
 
 ### 3.3. Worker 管理器 (`WorkerManager`)
 
 - 该组件仅在 `config.yaml` 中定义了 `managed_workers` 时才被激活。
 - **功能**:
-    - **启动 (Launch)**: 在 Gateway 启动时，根据配置列表，为每个 Worker 创建并启动一个子进程 (`serve.py`)。它会负责构建命令行参数（如 `--model-path`, `--port`）和设置 `CUDA_VISIBLE_DEVICES` 环境变量。
-    - **监控 (Monitor)**: 监控它所创建的子进程的生命周期。
+    - **启动 (Launch)**: 在 Gateway 启动时，根据配置列表，为每个 Worker 创建并启动一个子进程 (`serve.py`)。它会负责构建命令行参数和设置 `CUDA_VISIBLE_DEVICES` 环境变量。
+    - **按需启动 (On-demand Launch)**: 能够根据 `model_name` 启动单个 Worker。这是实现自愈机制的基础。
     - **终止 (Terminate)**: 在 Gateway 关闭时，优雅地终止所有由它管理的 Worker 子进程。
 
 ### 3.4. API 服务器 (FastAPI)
@@ -100,13 +101,12 @@ graph TD
 Gateway 的所有网络交互都通过一个 FastAPI 应用提供。
 
 - **数据平面 (Data Plane)**:
-    - 由 `LiteLLM` 提供核心的 OpenAI 兼容 API (`/v1/chat/completions`, `/v1/models` 等)。
-    - LiteLLM 的 `router` 被配置为动态模式，其模型列表 (`litellm.model_list`) 会由一个后台任务定期从 `ServiceRegistry` 中同步，确保路由信息总是最新的。
+    - 提供核心的 OpenAI 兼容 API (`/v1/chat/completions`, `/v1/models` 等)。
+    - 请求路由器根据客户端请求的 `model` 字段，向 `ServiceRegistry` 查询一个可用的 Worker，然后将请求直接代理过去。
 
 - **控制平面 (Control Plane)**:
     - **Worker API (`/v1/workers/heartbeat`)**: 接收 Worker 的注册和心跳请求，并调用 `ServiceRegistry` 进行处理。
     - **管理 API (`/v1/admin/*`)**: 提供给管理员的一系列接口，用于查询 Worker 状态（从 `ServiceRegistry` 读取）、启动新 Worker（通过 `WorkerManager`）等。
-    - **日志流 API (`/v1/logs/stream/{worker_id}`)**: （设计）可能是一个代理端点，当管理员访问时，Gateway 会连接到对应 Worker 的 `/logs/stream` SSE 端点，并实时将日志流转发给管理员。
 
 ## 4. 执行流程
 
@@ -121,19 +121,17 @@ graph TD
     E -- 是 --> F[Worker管理器启动所有 managed_workers 子进程];
     E -- 否 --> G[跳过子进程启动];
     F --> G;
-    G --> H{配置并初始化 LiteLLM 路由器};
-    H --> I[启动后台任务: 定期从注册中心同步模型列表到LiteLLM];
-    I --> J[启动后台任务: 定期检查Worker心跳超时];
-    J --> K{启动 FastAPI/Uvicorn 服务器};
-    K --> L{Gateway 开始监听端口 (e.g., 4000)};
-    L -- "接收 /v1/workers/heartbeat" --> M[更新服务注册中心];
-    L -- "接收 /v1/chat/completions" --> N[LiteLLM 根据注册中心信息路由请求];
-    L -- "接收 /v1/admin/workers" --> O[从注册中心查询并返回Worker列表];
-    L -- 收到 SIGINT/SIGTERM --> P[触发优雅关闭];
-    P --> Q[停止所有后台任务];
-    Q --> R[Worker管理器终止所有子进程];
-    R --> S[停止Web服务器];
-    S --> T[结束];
+    G --> H[启动后台任务: 检查Worker健康状态<br>(超时则重启managed-worker)];
+    H --> I{启动 FastAPI/Uvicorn 服务器};
+    I --> J{Gateway 开始监听端口 (e.g., 4000)};
+    J -- "接收 /v1/workers/heartbeat" --> K[更新服务注册中心];
+    J -- "接收 /v1/chat/completions" --> L[路由器根据注册中心信息转发请求];
+    J -- "接收 /v1/admin/workers" --> M[从注册中心查询并返回Worker列表];
+    J -- 收到 SIGINT/SIGTERM --> N[触发优雅关闭];
+    N --> O[停止所有后台任务];
+    O --> P[Worker管理器终止所有子进程];
+    P --> Q[停止Web服务器];
+    Q --> R[结束];
 ```
 
 ## 5. API 规范
@@ -155,8 +153,8 @@ Gateway API 分为数据平面和控制平面。
 #### i. Worker-Gateway 交互接口
 
 - `POST /v1/workers/heartbeat`
-  - **功能**: Worker 使用此接口进行首次注册和后续的周期性心跳。Gateway 采用 "upsert" 逻辑处理请求。
-  - **请求体**: 包含 Worker 的完整元数据。
+  - **功能**: Worker 使用此接口进行首次注册和后续的周期性心跳。Gateway 根据心跳包中的 `state` 字段执行相应操作。
+  - **请求体**: 包含 Worker 的完整元数据和当前状态。
     ```json
     {
       "worker_id": "unique-worker-id-123",
@@ -165,9 +163,13 @@ Gateway API 分为数据平面和控制平面。
       "backend": "vllm",
       "host": "192.168.1.10",
       "port": 8001,
-      "status": "healthy"
+      "state": "initializing"
     }
     ```
+  - **状态 (state) 字段详解**:
+    - `initializing`: Worker 已启动但模型仍在加载。Gateway 会注册此 Worker，但不会将流量路由给它。
+    - `ready`: Worker 已准备就绪，可以接收推理请求。Gateway 会将其加入活动路由表。
+    - `terminating`: Worker 正在优雅关闭。Gateway 会立即将其从注册表中移除。
 
 #### ii. 管理员接口
 
@@ -232,6 +234,7 @@ litellm_settings:
     - `host`: Gateway 监听的主机地址。
     - `port`: Gateway 监听的端口。
     - `log_level`: Gateway 自身的日志级别。
+    - `heartbeat_timeout`: （新增）定义 Worker 心跳的超时时间（秒）。超过此时长未收到心跳的 Worker 会被视为不健康。
 
 - **`managed_workers`**:
     - 这是一个列表，每一项定义一个由 Gateway 直接管理的 Worker。
@@ -243,11 +246,8 @@ litellm_settings:
     - `heartbeat_interval`: Worker 向 Gateway 发送心跳的间隔秒数。
     - **其他参数**: 任何未被 Gateway 明确定义的参数 (如 `tensor_parallel_size`) 都会被自动转换为命令行参数（如 `--tensor-parallel-size 2`）并传递给 `serve.py` 子进程。
 
-- **`litellm_settings`**:
-    - 存放所有应用于 LiteLLM 模块的全局配置。
-    - Gateway 启动时，会遍历此部分下的所有键值对，并执行类似 `litellm.<key> = <value>` 的操作。
-    - 例如，设置 `drop_params: True` 会执行 `litellm.drop_params = True`。
-    - 更多可用配置，请参考 LiteLLM 的官方文档。
+- **~~`litellm_settings`~~**:
+    - (此部分已移除) Gateway 现在采用直接请求转发的模式，不再深度集成 LiteLLM 的路由模块。
 
 ## 7. 启动方式
 
