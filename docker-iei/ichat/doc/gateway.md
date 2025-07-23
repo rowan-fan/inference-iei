@@ -81,11 +81,16 @@ graph TD
 
 - 这是 Gateway 的核心组件之一，一个内存中的数据库，用于跟踪所有 Worker 的状态。
 - **功能**:
-    - **注册 (Register)**: 当 Worker 发送心跳时，将其元数据（模型名称、地址、端口、状态等）“更新或插入”到注册表。
-    - **状态处理 (State Handling)**:
-        - `initializing`/`ready`: Worker 正常运行中，更新其心跳时间戳。
-        - `terminating`: Worker 正在优雅关闭，立即从注册表中移除，无需等待超时。
-    - **健康检查与自愈 (Health Check & Self-healing)**: 后台任务定期扫描所有 Worker。如果一个 *managed worker* 心跳超时，`ServiceRegistry` 会主动通知 `WorkerManager` 对其进行重启，实现故障自愈。对于动态注册的 Worker，仅将其移除。
+    - **注册与状态处理 (Registration & State Handling)**:
+        - 当 Worker 发送 `initializing` 或 `ready` 状态的心跳时，注册中心会执行一套健壮的检查流程来确保模型服务的唯一性：
+            1.  **冲突检测**: 首先检查是否已存在服务于同一 `model_name` 的 Worker。
+            2.  **拒绝冲突**: 如果存在一个**活跃的**（即状态不是 `terminating`）Worker，本次注册将被**拒绝**，以防止同一模型被多个 Worker 同时服务。
+            3.  **平滑接管**: 如果存在的 Worker 状态为 `terminating`，这表明一个旧 Worker 正在被替换。此时，新 Worker 的注册将被接受，并且旧 Worker 的记录会被原子地移除，从而实现无缝的滚动重启。
+            4.  **正常注册**: 如果没有冲突，则将 Worker 的元数据（模型名称、地址、端口、状态等）“更新或插入”到注册表。
+        - 当 Worker 发送 `terminating` 状态的心跳时，表明其正在优雅关闭。此状态会触发其在 Gateway 中的特定处理：
+            - **对于由 Gateway 管理的 Worker (Managed Worker)**: Gateway 会保留该 Worker 的条目，仅将其状态更新为 `terminating`，并立即触发 `WorkerManager` 对其进行**重启**。该条目最终会被新启动的 Worker 实例所替换。
+            - **对于外部动态注册的 Worker**: Gateway 会立即将其从服务注册表中移除。
+    - **健康检查与自愈 (Health Check & Self-healing)**: 后台任务定期扫描所有 Worker。如果一个 *managed worker* 心跳超时，`ServiceRegistry` 会主动通知 `WorkerManager` 对其进行重启，实现故障自愈。对于动态注册的 Worker，超时仅会将其移除。
     - **路由信息提供 (Provide Routing Info)**: 为请求路由器提供一份健康的、可用的 (`state='ready'`) Worker 列表。
 
 ### 3.3. Worker 管理器 (`WorkerManager`)
@@ -93,7 +98,11 @@ graph TD
 - 该组件仅在 `config.yaml` 中定义了 `managed_workers` 时才被激活。
 - **功能**:
     - **启动 (Launch)**: 在 Gateway 启动时，根据配置列表，为每个 Worker 创建并启动一个子进程 (`serve.py`)。它会负责构建命令行参数和设置 `CUDA_VISIBLE_DEVICES` 环境变量。
-    - **按需启动 (On-demand Launch)**: 能够根据 `model_name` 启动单个 Worker。这是实现自愈机制的基础。
+    - **可靠的重启与自愈 (Reliable Restart & Self-healing)**: 这是 `WorkerManager` 的关键自愈功能。当收到重启请求时（无论是由于心跳超时还是 Worker 主动发送 `terminating` 信号），它会执行以下健壮的流程：
+        1.  **检查现有进程**: 首先检查是否已存在一个与该模型关联的旧进程。
+        2.  **等待旧进程终止**: 如果旧进程仍在运行，管理器会**等待其正常退出**（有超时限制）。这解决了旧进程关闭缓慢导致的重启失败问题。
+        3.  **强制清理**: 如果旧进程在超时后仍未退出，管理器会强制将其终止，以防僵尸进程占用资源。
+        4.  **启动新进程**: 只有在确认旧进程已完全终止后，才会启动一个新的 Worker 子进程。
     - **终止 (Terminate)**: 在 Gateway 关闭时，优雅地终止所有由它管理的 Worker 子进程。
 
 ### 3.4. API 服务器 (FastAPI)
@@ -145,7 +154,7 @@ Gateway API 分为数据平面和控制平面。
 - `POST /v1/chat/completions`: 接收聊天补全请求，根据 `model` 字段路由到合适的 Worker。
 - `POST /v1/completions`: (传统接口) 接收文本补全请求并路由。
 - `POST /v1/embeddings`: 接收文本嵌入请求并路由。
-- `GET /v1/models`: 聚合所有已注册的、健康的 Worker 的模型信息，并返回一个统一的模型列表。
+- `GET /v1/models`: 聚合所有已注册的 Worker 的模型信息。为了提供更准确的服务可用性视图，此接口会返回所有处于 `ready` (已就绪) 状态的 Worker 所对应的模型。
 - `GET /v1/models/{model_name}`: 获取特定模型的详细信息。
 
 ### b. 控制平面 API (面向 Worker 和管理员)
@@ -153,7 +162,7 @@ Gateway API 分为数据平面和控制平面。
 #### i. Worker-Gateway 交互接口
 
 - `POST /v1/workers/heartbeat`
-  - **功能**: Worker 使用此接口进行首次注册和后续的周期性心跳。Gateway 根据心跳包中的 `state` 字段执行相应操作。
+  - **功能**: Worker 使用此接口进行首次注册和后续的周期性心跳。Gateway 根据心跳包中的 `state` 字段执行相应操作，并强制确保模型名称的唯一性。
   - **请求体**: 包含 Worker 的完整元数据和当前状态。
     ```json
     {
@@ -166,10 +175,12 @@ Gateway API 分为数据平面和控制平面。
       "state": "initializing"
     }
     ```
+  - **响应**:
+    - `200 OK`: 心跳被成功接收和处理。
+    - `409 Conflict`: 注册失败，因为请求的 `model_name` 已经被另一个活跃的 Worker 占用。
   - **状态 (state) 字段详解**:
-    - `initializing`: Worker 已启动但模型仍在加载。Gateway 会注册此 Worker，但不会将流量路由给它。
-    - `ready`: Worker 已准备就绪，可以接收推理请求。Gateway 会将其加入活动路由表。
-    - `terminating`: Worker 正在优雅关闭。Gateway 会立即将其从注册表中移除。
+    - `initializing` / `ready`: Worker 尝试注册或更新心跳。Gateway 会执行**冲突检测**：如果模型名已被一个活跃 Worker 占用，则拒绝注册并返回 `409`；如果被一个正在终止 (`terminating`) 的 Worker 占用，则允许注册并替换掉旧 Worker；否则，正常注册/更新。
+    - `terminating`: Worker 正在优雅关闭。Gateway 会根据其是 `managed` 还是 `dynamic` 类型来执行不同的处理逻辑（例如，为 `managed` 类型触发重启）。
 
 #### ii. 管理员接口
 

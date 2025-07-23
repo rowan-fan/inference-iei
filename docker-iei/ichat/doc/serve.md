@@ -135,7 +135,7 @@ for arg_dest, arg_flag in shared_args.items():
 
 - **优雅关闭与最终状态**：
   - 当 `HeartbeatManager.stop()` 被调用时（在 `serve.py` 的优雅关闭流程中），它会执行以下关键操作：
-    1.  **发送 `terminating` 状态**: 立即发送一次**最后的心跳**，其状态为 `state="terminating"`。这会明确通知 Gateway 该 Worker 正在正常下线，应立即从服务列表中移除。
+    1.  **发送 `terminating` 状态**: 立即发送一次**最后的心跳**，其状态为 `state="terminating"`。这会明确通知 Gateway 该 Worker 正在正常下线。对于一个由 Gateway 管理的 Worker，这个信号是触发其在 Gateway 端**可靠重启流程**的关键一步，而不是简单地将其移除。
     2.  **停止循环**: 设置内部停止事件，终止心跳循环。
     3.  **资源清理**: 关闭 aiohttp session，并确保任务被正确取消。
 
@@ -163,7 +163,7 @@ await self.backend_ready.wait()
 self.state = "ready" # 后端就绪，更新状态
 
 # HeartbeatManager.stop()
-await self._send_heartbeat(state="terminating") # 发送最后的心跳
+await self._send_heartbeat(state="terminating") # 发送最后的心跳以触发优雅关闭/重启
 self._should_stop.set() # 停止循环
 ```
 

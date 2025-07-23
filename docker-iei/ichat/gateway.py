@@ -8,7 +8,7 @@ import subprocess
 import time
 from contextlib import asynccontextmanager
 from threading import Lock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import uvicorn
@@ -35,52 +35,74 @@ class ServiceRegistry:
             set(worker_manager.worker_configs.keys()) if worker_manager else set()
         )
 
-    def register_worker(self, **kwargs: Any) -> None:
+    def register_worker(self, **kwargs: Any) -> Tuple[bool, str]:
         """
         Registers or updates a worker's information and heartbeat.
         A worker sending a 'terminating' state will be removed, and if it's
         a managed worker, a restart will be triggered.
+
+        Returns:
+            A tuple of (success, message).
         """
         worker_id = kwargs.get("worker_id")
         if not worker_id:
-            return
+            return False, "worker_id not provided"
 
         state = kwargs.get("state")
+        model_name = kwargs.get("model_name")
 
         if state == "terminating":
             with self._lock:
-                # If it's a managed worker that is terminating, we keep it in the registry
-                # with a 'terminating' state. This prevents a race condition where a client
-                # might see a model as unavailable because the old worker is gone but the
-                # new one hasn't registered yet. The unhealthy worker check will clean it up.
                 if worker_id in self._workers:
                     worker_info = self._workers[worker_id]
                     model_name = worker_info.get("model_name")
                     is_managed = self.worker_manager and model_name in self.managed_models
 
                     if is_managed:
-                        # For managed workers, update state to 'terminating'.
-                        # The old worker entry will be replaced when the new one registers.
                         self._workers[worker_id]["state"] = "terminating"
                         self._workers[worker_id]["last_heartbeat"] = time.time()
-                        print(f"INFO:     Managed worker {worker_id} ({model_name}) sent 'terminating' state. Awaiting restart.")
+                        msg = f"Managed worker {worker_id} ({model_name}) sent 'terminating' state. Awaiting restart."
+                        print(f"INFO:     {msg}")
                     else:
-                        # For unmanaged workers, remove immediately.
-                        self._workers.pop(worker_id)
-                        print(f"INFO:     Unmanaged worker {worker_id} ({model_name}) sent 'terminating' state. Removing from registry.")
+                        self._workers.pop(worker_id, None)
+                        msg = f"Unmanaged worker {worker_id} ({model_name}) sent 'terminating' state. Removing from registry."
+                        print(f"INFO:     {msg}")
                     
-                    # Trigger restart for managed workers regardless.
                     if is_managed:
                         print(f"INFO:     Attempting to restart managed worker for model '{model_name}'...")
                         asyncio.create_task(self.worker_manager.start_worker(model_name))
-            return
+                    
+                    return True, msg
+            return True, f"Terminating worker {worker_id} not found in registry."
 
         # For any other state ("initializing", "ready"), perform an "upsert" operation.
         with self._lock:
+            # Check for conflicts with existing workers for the same model.
+            existing_workers = [
+                (w_id, w_info)
+                for w_id, w_info in self._workers.items()
+                if w_info.get("model_name") == model_name and w_id != worker_id
+            ]
+
+            # Prohibit registration if an active worker already exists.
+            for w_id, w_info in existing_workers:
+                if w_info.get("state") != "terminating":
+                    message = f"Model '{model_name}' is already served by active worker {w_id} (state: {w_info.get('state')}). Registration rejected."
+                    print(f"WARN:     {message}")
+                    return False, message
+            
+            # Clean up old workers for the same model that are in 'terminating' state.
+            old_worker_ids_to_remove = [w_id for w_id, w_info in existing_workers]
+            for old_id in old_worker_ids_to_remove:
+                print(f"INFO:     New worker {worker_id} registering for model '{model_name}'. Replacing old terminating worker entry {old_id}.")
+                self._workers.pop(old_id, None)
+            
+            # Register or update the current worker.
             self._workers[worker_id] = {
                 **kwargs,
                 "last_heartbeat": time.time(),
             }
+            return True, f"Heartbeat received from {worker_id}"
 
     async def check_unhealthy_workers(self) -> None:
         """
@@ -302,8 +324,10 @@ app = FastAPI(lifespan=lifespan)
 # Control Plane: For worker and admin interaction
 @app.post("/v1/workers/heartbeat")
 async def receive_heartbeat(payload: HeartbeatPayload):
-    service_registry.register_worker(**payload.model_dump())
-    return {"status": "ok", "message": f"Heartbeat received from {payload.worker_id}"}
+    success, message = service_registry.register_worker(**payload.model_dump())
+    if not success:
+        raise HTTPException(status_code=409, detail=message)
+    return {"status": "ok", "message": message}
 
 @app.get("/v1/admin/workers")
 async def list_workers():
@@ -386,7 +410,7 @@ async def get_models():
         model_name = worker_info.get("model_name")
         # Expose models that are either ready or in the process of initializing.
         # This gives a more accurate view of service availability during startup or restarts.
-        if worker_info.get("state") in ["ready", "initializing"] and model_name not in registered_models:
+        if worker_info.get("state") in ["ready"] and model_name not in registered_models:
             model_list.append(
                 {
                     "id": model_name,
