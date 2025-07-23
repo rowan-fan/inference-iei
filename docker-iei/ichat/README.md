@@ -64,32 +64,44 @@ graph TD
 ## 项目结构
 
 ```
-docker-iei/ichat/
-├── README.md            # 项目文档
-├── gateway.py           # iChat Gateway 入口
-├── serve.py             # Worker 入口
-├── config.yaml.example  # Gateway 配置文件示例
-├── doc                  # 产品设计文档
-├── gateway/             # Gateway核心逻辑
-│   ├── __init__.py
-│   ├── api.py           # FastAPI应用、路由和生命周期管理
-│   ├── registry.py      # 服务注册中心 (ServiceRegistry)
-│   └── worker_manager.py # Worker进程管理器 (WorkerManager)
-├── backends/             # 推理引擎的抽象和实现
+ichat/
+├── backends
+│   ├── base_backend.py
 │   ├── __init__.py
-│   ├── base.py          # 基础引擎抽象类
-│   ├── vllm_backend.py   # vLLM引擎实现
-│   └── sglang_backend.py # SGLang引擎实现
-├── config/              # 配置相关
+│   ├── __pycache__
+│   ├── sglang_backend.py
+│   └── vllm_backend.py
+├── config.yaml
+├── doc
+│   ├── args_detail.md
+│   ├── gateway_interface.md
+│   ├── gateway.md
+│   ├── litellm.md
+│   ├── serve_interface.md
+│   ├── sglang_backend.md
+│   ├── vllm_backend.md
+│   └── worker.md
+├── gateway
+│   ├── api.py
+│   ├── __main__.py
+│   ├── __pycache__
+│   ├── registry.py
+│   └── worker_manager.py
+├── install_if_not_exists.sh
+├── __pycache__
+├── README.md
+├── run.sh
+├── utils
+│   ├── common.py
 │   ├── __init__.py
-│   └── args.py          # Worker参数解析 (框架与后端分离)
-├── utils/               # 工具函数
-│   ├── __init__.py
-│   ├── common.py        # 通用工具函数
-│   └── logger.py        # 日志处理模块
-└── monitor/             # 监控和服务发现
+│   ├── logger.py
+│   └── __pycache__
+└── worker
+    ├── args.py
+    ├── heartbeat.py
     ├── __init__.py
-    └── heartbeat.py     # 心跳检测机制
+    ├── __main__.py
+    └── __pycache__
 ```
 
 ## 设计原则

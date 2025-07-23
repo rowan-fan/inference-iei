@@ -1,8 +1,8 @@
-# iChat Gateway (`gateway.py`) 设计文档
+# iChat Gateway (`ichat.gateway`) 设计文档
 
 ## 1. 目标
 
-`gateway.py` 是 iChat 框架的中央网关服务，其核心职责是：
+`ichat.gateway` 是 iChat 框架的中央网关服务，其核心职责是：
 
 1.  **统一 API 入口**: 作为所有客户端请求的唯一入口，遵循 OpenAI API 标准。它利用 `LiteLLM` 提供统一的 `/v1/chat/completions` 等接口，将底层异构的 Worker 服务抽象化。
 2.  **动态请求路由**: 根据客户端请求中的 `model` 字段，智能地将流量动态路由到后端正确的 iChat Worker 实例。
@@ -11,7 +11,7 @@
 5.  **集中式管理与监控**: 提供一套管理 API，用于查询集群状态、查看所有已注册的 Worker、手动启动或停止 Worker 实例，并集中收集来自所有 Worker 的日志。
 6.  **混合部署模式支持**: 无缝集成两种 Worker 部署模式：由 Gateway 自动管理的进程和外部独立启动并向 Gateway 动态注册的进程。
 
-`gateway.py` 的设计旨在将客户端与后端模型服务完全解耦，提供一个稳定、可扩展、易于管理的中心控制平面，从而简化复杂的多模型、多节点推理服务的部署和运维。
+`ichat.gateway` 的设计旨在将客户端与后端模型服务完全解耦，提供一个稳定、可扩展、易于管理的中心控制平面，从而简化复杂的多模型、多节点推理服务的部署和运维。
 
 ## 2. 设计原则
 
@@ -22,7 +22,7 @@
 - **开放标准兼容**: 通过直接转发请求或未来集成 LiteLLM 等工具，确保对 OpenAI API 生态系统的广泛兼容性。
 - **中心化控制 (Centralized Control)**: 为管理员提供了一套统一的 RESTful API，使其能够从一个中心点查看和控制整个 LLM 服务集群。
 
-## 3. `gateway.py` 核心架构
+## 3. `ichat.gateway` 核心架构
 
 Gateway 的架构是围绕一个中心化的 FastAPI 应用构建的，集成了服务注册、Worker 管理和请求路由等多个核心组件。
 
@@ -34,7 +34,7 @@ graph TD
         Worker[iChat Worker]
     end
 
-    subgraph "iChat Gateway (gateway.py)"
+    subgraph "iChat Gateway (ichat.gateway)"
         FastAPI["FastAPI 应用"]
         
         subgraph "控制平面 (Control Plane)"
@@ -74,7 +74,7 @@ graph TD
 
 ### 3.1. 主程序与配置加载
 
-- Gateway 由 `gateway.py` 启动，它需要一个 `--config` 参数指定 `config.yaml` 配置文件的路径。
+- Gateway 通过 `python3 -m ichat.gateway` 命令启动，它需要一个 `--config` 参数指定 `config.yaml` 配置文件的路径。
 - 启动时，程序首先解析 YAML 文件，获取 `server_settings` 和 `managed_workers` 等配置。
 
 ### 3.2. 服务注册中心 (`ServiceRegistry`)
@@ -97,7 +97,7 @@ graph TD
 
 - 该组件仅在 `config.yaml` 中定义了 `managed_workers` 时才被激活。
 - **功能**:
-    - **启动 (Launch)**: 在 Gateway 启动时，根据配置列表，为每个 Worker 创建并启动一个子进程 (`serve.py`)。它会负责构建命令行参数和设置 `CUDA_VISIBLE_DEVICES` 环境变量。
+    - **启动 (Launch)**: 在 Gateway 启动时，根据配置列表，为每个 Worker 创建并启动一个 `python3 -m ichat.worker` 子进程。它会负责构建命令行参数和设置 `CUDA_VISIBLE_DEVICES` 环境变量。
     - **可靠的重启与自愈 (Reliable Restart & Self-healing)**: 这是 `WorkerManager` 的关键自愈功能。当收到重启请求时（无论是由于心跳超时还是 Worker 主动发送 `terminating` 信号），它会执行以下健壮的流程：
         1.  **检查现有进程**: 首先检查是否已存在一个与该模型关联的旧进程。
         2.  **等待旧进程终止**: 如果旧进程仍在运行，管理器会**等待其正常退出**（有超时限制）。这解决了旧进程关闭缓慢导致的重启失败问题。
@@ -119,7 +119,7 @@ Gateway 的所有网络交互都通过一个 FastAPI 应用提供。
 
 ## 4. 执行流程
 
-`gateway.py` 的 `main` 函数遵循以下执行流程：
+`ichat.gateway` 的 `main` 函数遵循以下执行流程：
 
 ```mermaid
 graph TD
@@ -255,14 +255,14 @@ litellm_settings:
     - `gpu_ids`: 一个整数列表，指定分配给此 Worker 的物理 GPU 索引。Gateway 会自动设置 `CUDA_VISIBLE_DEVICES` 环境变量。
     - `port`: 分配给此 Worker 监听的端口。
     - `heartbeat_interval`: Worker 向 Gateway 发送心跳的间隔秒数。
-    - **其他参数**: 任何未被 Gateway 明确定义的参数 (如 `tensor_parallel_size`) 都会被自动转换为命令行参数（如 `--tensor-parallel-size 2`）并传递给 `serve.py` 子进程。
+    - **其他参数**: 任何未被 Gateway 明确定义的参数 (如 `tensor_parallel_size`) 都会被自动转换为命令行参数（如 `--tensor-parallel-size 2`）并传递给 `ichat.worker` 子进程。
 
 - **~~`litellm_settings`~~**:
     - (此部分已移除) Gateway 现在采用直接请求转发的模式，不再深度集成 LiteLLM 的路由模块。
 
 ## 7. 启动方式
 
-要正确启动 iChat Gateway，请遵循以下步骤。关键在于需要将 `ichat` 目录作为 Python 的一个模块来运行，而不是直接执行 `gateway.py` 文件。
+要正确启动 iChat Gateway，请遵循以下步骤。关键在于需要将 `ichat` 目录作为 Python 的一个模块来运行。
 
 ### a. 目录结构
 
@@ -271,8 +271,12 @@ litellm_settings:
 ```
 /app/
 └── ichat/
-    ├── gateway.py
-    ├── serve.py
+    ├── gateway/
+    │   ├── __main__.py
+    │   └── ...
+    ├── worker/
+    │   ├── __main__.py
+    │   └── ...
     ├── config.yaml
     └── ...
 ```
@@ -287,7 +291,7 @@ litellm_settings:
 python3 -m ichat.gateway --config ichat/config.yaml
 ```
 
-- **`python3 -m ichat.gateway`**: 这会告诉 Python 将 `ichat` 目录当作一个包，并执行其中的 `gateway` 模块。这是解决 `ImportError` 的正确方法。
+- **`python3 -m ichat.gateway`**: 这会告诉 Python 将 `ichat` 目录当作一个包，并执行其中的 `gateway` 模块（即 `gateway/__main__.py`）。这是解决 `ImportError` 和命名冲突的正确方法。
 - **`--config ichat/config.yaml`**: 指定配置文件的路径。请注意，路径是相对于您当前所在的父目录（`/app`）而言的。
 
 ### c. 配置文件
