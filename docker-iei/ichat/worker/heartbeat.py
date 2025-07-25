@@ -44,8 +44,8 @@ class HeartbeatManager:
             ),
             "model_path": framework_args.model_path,
             "backend": framework_args.backend,
-            "host": backend_args.host,
-            "port": backend_args.port,
+            "host": backend_args.get("host"),
+            "port": backend_args.get("port"),
         }
 
         self._session: Optional[aiohttp.ClientSession] = None

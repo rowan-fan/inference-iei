@@ -86,6 +86,9 @@ async def main() -> None:
     elif framework_args.backend == "sglang":
         from ..backends.sglang_backend import SGLangBackend
         backend = SGLangBackend(framework_args, backend_argv, backend_ready_event)
+    elif framework_args.backend == "sentence":
+        from ..backends.sentence_backend.sentence_backend import SentenceBackend
+        backend = SentenceBackend(framework_args, backend_argv, backend_ready_event)
     else:
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
 
