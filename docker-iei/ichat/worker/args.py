@@ -74,18 +74,6 @@ def parse_worker_args():
         default=None,
         help="The path to the model weights.",
     )
-    # ichat_group.add_argument(
-    #     "--tokenizer-path",
-    #     type=str,
-    #     default=None,
-    #     help="The path to the tokenizer.",
-    # )
-    # ichat_group.add_argument(
-    #     "--context-length",
-    #     type=int,
-    #     default=None,
-    #     help="The maximum context length for the model.",
-    # )
 
 
 

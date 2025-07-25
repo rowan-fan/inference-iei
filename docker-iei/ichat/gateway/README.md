@@ -149,11 +149,12 @@ Gateway API 分为数据平面和控制平面。
 
 ### a. 数据平面 API (OpenAI 兼容, 面向客户端)
 
-由 LiteLLM 提供，与 OpenAI API 完全兼容。
+Gateway 采用直接请求转发的模式，将客户端请求透传到后端匹配的 Worker。所有 `POST` 请求都必须在请求体中包含 `model` 字段，Gateway 以此作为路由依据。
 
-- `POST /v1/chat/completions`: 接收聊天补全请求，根据 `model` 字段路由到合适的 Worker。
-- `POST /v1/completions`: (传统接口) 接收文本补全请求并路由。
-- `POST /v1/embeddings`: 接收文本嵌入请求并路由。
+- `POST /v1/chat/completions`: 接收聊天补全请求，并将其转发给服务于指定 `model` 的 Worker。
+- `POST /v1/completions`: 接收文本补全请求并转发。
+- `POST /v1/embeddings`: 接收文本嵌入请求并转发。
+- `POST /v1/rerank`: 接收重排序（rerank）请求并转发。
 - `GET /v1/models`: 聚合所有已注册的 Worker 的模型信息。为了提供更准确的服务可用性视图，此接口会返回所有处于 `ready` (已就绪) 状态的 Worker 所对应的模型。
 - `GET /v1/models/{model_name}`: 获取特定模型的详细信息。
 

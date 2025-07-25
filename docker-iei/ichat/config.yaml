@@ -1,30 +1,19 @@
 # Gateway服务配置
 server_settings:
-  host: 0.0.0.0
-  port: 8080
-  log_level: info
+  host: ${ICHAT_GW_HOST:-0.0.0.0}
+  port: ${ICHAT_GW_PORT:-8080}
+  log_level: ${ICHAT_GW_LOG_LEVEL:-info}
 
 # Gateway自动管理的Worker配置
 # Gateway会根据此列表自动启动和管理Worker进程
 managed_workers:
-  - model_name: qwen
-    model_path: /mnt/models/Qwen3-1.7B
-    backend: sglang
-    gpu_ids: [0]
-    port: 8001
-    heartbeat_interval: 10
-    # 以下为透传给 vLLM 的参数
-    tensor_parallel_size: 1
-    gpu_memory_utilization: 0.9
-
-# LiteLLM设置
-# 此处的设置将作为全局配置应用于LiteLLM模块
-# 更多设置请参考 LiteLLM 文档: https://docs.litellm.ai/docs/
-litellm_settings:
-  # 是否在请求传递给模型前，移除不被模型支持的参数。
-  # 推荐设置为 True 以增强兼容性。
-  drop_params: True
-  # 设置全局超时时间（秒）
-  # timeout: 600
-  # 设置全局重试次数
-  # num_retries: 3
+  - model_name: ${ICHAT_WORKER_MODEL_NAME:-/mnt/models}
+    model_path: ${ICHAT_WORKER_MODEL_PATH:-/mnt/models}
+    backend: ${ICHAT_WORKER_BACKEND:-vllm}
+    gpu_ids: ${ICHAT_WORKER_GPU_IDS}
+    port: ${ICHAT_WORKER_PORT:-8001}
+    heartbeat_interval: ${ICHAT_WORKER_HEARTBEAT_INTERVAL:-10}
+    # 以下为透传给 vLLM/SGLang 的参数
+    context_length: ${ICHAT_WORKER_CONTEXT_LENGTH}
+    tensor_parallel_size: ${ICHAT_WORKER_TENSOR_PARALLEL_SIZE}
+    gpu_memory_utilization: ${ICHAT_WORKER_GPU_MEMORY_UTILIZATION}

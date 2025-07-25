@@ -83,6 +83,8 @@ class VLLMBackend(BaseBackend):
         # Note: This is a placeholder for a more robust mapping if names differ.
         if not any(opt.dest == 'model_path' for opt in parser._actions):
              parser.add_argument("--model-path", type=str, default=None, help="iChat alias for --model.")
+        if not any(opt.dest == 'tokenizer_path' for opt in parser._actions):
+             parser.add_argument("--tokenizer-path", type=str, default=None, help="iChat alias for --tokenizer.")
         if not any(opt.dest == 'context_length' for opt in parser._actions):
              parser.add_argument("--context-length", type=int, default=None, help="iChat alias for --max-model-len.")
 
@@ -94,6 +96,9 @@ class VLLMBackend(BaseBackend):
         # to the corresponding vLLM argument.
         if vllm_args.model_path is not None:
             vllm_args.model = vllm_args.model_path
+
+        if vllm_args.tokenizer_path is not None:
+            vllm_args.tokenizer = vllm_args.tokenizer_path
 
         if vllm_args.context_length is not None:
             vllm_args.max_model_len = vllm_args.context_length

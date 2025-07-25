@@ -88,8 +88,11 @@ async def list_workers():
 
 
 # Data Plane: For client requests, with custom routing
-@app.api_route("/v1/chat/completions", methods=["POST"])
-async def chat_completions(request: Request):
+async def _forward_request_to_worker(request: Request):
+    """
+    Generic function to forward a request to a worker based on the model name in the
+    request body. It handles both streaming and non-streaming responses.
+    """
     data = await request.json()
     model_name = data.get("model")
     assert service_registry is not None
@@ -102,7 +105,7 @@ async def chat_completions(request: Request):
     if not worker:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found or not ready.")
 
-    worker_url = f"http://{worker['host']}:{worker['port']}/v1/chat/completions"
+    worker_url = f"http://{worker['host']}:{worker['port']}{request.url.path}"
 
     is_streaming = data.get("stream", False)
 
@@ -147,6 +150,26 @@ async def chat_completions(request: Request):
             status_code=500,
             detail=f"Internal server error while communicating with worker: {str(e)}",
         )
+
+
+@app.api_route("/v1/chat/completions", methods=["POST"])
+async def chat_completions(request: Request):
+    return await _forward_request_to_worker(request)
+
+
+@app.api_route("/v1/completions", methods=["POST"])
+async def completions(request: Request):
+    return await _forward_request_to_worker(request)
+
+
+@app.api_route("/v1/embeddings", methods=["POST"])
+async def embeddings(request: Request):
+    return await _forward_request_to_worker(request)
+
+
+@app.api_route("/v1/rerank", methods=["POST"])
+async def rerank(request: Request):
+    return await _forward_request_to_worker(request)
 
 
 @app.api_route("/v1/models", methods=["GET"])
