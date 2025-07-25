@@ -1,0 +1,31 @@
+# Gateway服务配置
+server_settings:
+  host: 0.0.0.0
+  port: 8080
+  log_level: info
+
+# Gateway自动管理的Worker配置
+# Gateway会根据此列表自动启动和管理Worker进程
+managed_workers:
+  - model_name: qwen
+    model_path: /mnt/models/Qwen3-1.7B
+    backend: vllm
+    gpu_ids: [0]
+    port: 8001
+    heartbeat_interval: 10
+    # 以下为透传给 vLLM/SGLang 的参数
+    context_length: 8192
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.75
+  - model_name: bge-m3
+    model_path: /mnt/models/bge-m3
+    backend: vllm
+    gpu_ids: [0]
+    port: 8002
+    heartbeat_interval: 10
+  # - model_name: bge-reranker-v2-m3
+  #   model_path: /mnt/models/bge-reranker-v2-m3
+  #   backend: vllm
+  #   gpu_ids: [0]
+  #   port: 8003
+  #   heartbeat_interval: 10

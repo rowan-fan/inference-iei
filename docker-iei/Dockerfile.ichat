@@ -7,6 +7,11 @@ WORKDIR /app
 ADD ./ichat /app/ichat
 
 RUN pip install --upgrade pip \
-&& pip install --no-deps /app/ichat/sglang_whls/*.whl
-
-# CMD ["python", "ichat/serve.py"]
+&& pip install --no-deps /app/ichat/sglang_whls/*.whl \
+&& pip install --no-deps /app/ichat/xinference_whls/* \
+&& pip install --no-deps /app/ichat/mineru_whls/* \
+&& pip install --ignore-installed flask flask_restful \
+&& rm -rf /app/ichat/sglang_whls \
+&& rm -rf /app/ichat/xinference_whls \
+&& rm -rf /app/ichat/mineru_whls \
+&& pip cache purge

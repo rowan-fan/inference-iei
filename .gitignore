@@ -6,6 +6,8 @@ docker-iei/vllm
 docker-iei/sglang
 docker-iei/epaipdfparser
 sglang_whls
+xinference_whls
+mineru_whls
 
 # C extensions
 *.so
