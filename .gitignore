@@ -8,6 +8,7 @@ docker-iei/epaipdfparser
 sglang_whls
 xinference_whls
 mineru_whls
+ollama_whls
 
 # C extensions
 *.so

@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 class SentenceBackend(BaseBackend):
     def __init__(self, framework_args: Namespace, backend_argv: List[str], backend_ready_event: asyncio.Event):
-        super().__init__(framework_args, backend_argv)
-        self.server_ready = backend_ready_event
+        super().__init__(framework_args, backend_argv, backend_ready_event)
         self.backend_args: Dict[str, Any] = self._parse_args(backend_argv)
+        self.final_backend_args = self.backend_args
         self.process: asyncio.subprocess.Process = None
         self.host = self.backend_args.get("host", "127.0.0.1")
         self.port = self.backend_args.get("port")
@@ -68,11 +68,11 @@ class SentenceBackend(BaseBackend):
         return {k: v for k, v in args_dict.items() if v is not None}
 
     def get_backend_args(self) -> Dict[str, Any]:
-        return self.backend_args
+        return self.final_backend_args
 
     async def run(self):
         cmd = [
-            "python3", "-m", "ichat.backends.sentence_backend.api_server"
+            "python3", "-m", "ichat.backends.sentence_transformer.api_server"
         ]
         for key, value in self.backend_args.items():
             cmd.append(f"--{key.replace('_', '-')}")

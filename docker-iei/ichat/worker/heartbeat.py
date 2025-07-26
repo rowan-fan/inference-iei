@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from argparse import Namespace
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import aiohttp
 
@@ -16,7 +16,7 @@ class HeartbeatManager:
     def __init__(
         self,
         framework_args: Namespace,
-        backend_args: Namespace,
+        backend_args: Dict[str, Any],
         backend_ready: asyncio.Event,
     ):
         """
@@ -44,8 +44,8 @@ class HeartbeatManager:
             ),
             "model_path": framework_args.model_path,
             "backend": framework_args.backend,
-            "host": getattr(backend_args, "host", None),
-            "port": getattr(backend_args, "port", None),
+            "host": backend_args.get("host"),
+            "port": backend_args.get("port"),
         }
 
         self._session: Optional[aiohttp.ClientSession] = None
@@ -160,4 +160,25 @@ class HeartbeatManager:
         if self._session:
             await self._session.close()
 
-        print("INFO:     Heartbeat manager stopped.") 
+        print("INFO:     Heartbeat manager stopped.")
+
+    async def enter_zombie_mode(self):
+        """
+        Enters a 'zombie' state where the worker continuously sends a 'terminating'
+        heartbeat. This is used when the worker fails to start up correctly but
+        should not immediately exit, allowing the gateway to recognize the
+        persistent failure state.
+        """
+        print("ERROR:    Worker failed to initialize. Entering zombie mode...")
+        
+        # Ensure any existing heartbeat loop is stopped.
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        
+        self._should_stop.clear()  # Ensure it doesn't stop immediately
+        self.state = "terminating"
+
+        # Send heartbeats indefinitely to signal a persistent failure.
+        while True:
+            await self._send_heartbeat(state=self.state)
+            await asyncio.sleep(self.heartbeat_interval) 

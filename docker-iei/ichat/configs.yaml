@@ -7,27 +7,34 @@ server_settings:
 # Gateway自动管理的Worker配置
 # Gateway会根据此列表自动启动和管理Worker进程
 managed_workers:
-  - model_name: qwen
-    model_path: /mnt/models/Qwen3-1.7B
-    backend: sglang
+  # - model_name: qwen
+  #   model_path: /mnt/models/Qwen3-1.7B
+  #   backend: sglang
+  #   gpu_ids: [0]
+  #   port: 8001
+  #   heartbeat_interval: 10
+  #   # 以下为透传给 vLLM/SGLang 的参数
+  #   context_length: 8192
+  #   tensor_parallel_size: 1
+  #   gpu_memory_utilization: 0.95
+  - model_name: bge-m3
+    model_path: /mnt/models/bge-m3
+    backend: sentence
     gpu_ids: [0]
-    port: 8001
+    port: 8002
+    task_type: embedding
     heartbeat_interval: 10
-    # 以下为透传给 vLLM/SGLang 的参数
-    context_length: 8192
-    tensor_parallel_size: 1
-    gpu_memory_utilization: 0.85
-  # - model_name: bge-m3
-  #   model_path: /mnt/models/bge-m3
-  #   backend: sentence
-  #   gpu_ids: [0]
-  #   port: 8002
-  #   task_type: embedding
-  #   heartbeat_interval: 10
-  # - model_name: bge-reranker-v2-m3
-  #   model_path: /mnt/models/bge-reranker-v2-m3
-  #   backend: sentence
-  #   gpu_ids: [0]
-  #   port: 8003
-  #   task_type: rerank
-  #   heartbeat_interval: 10
+  - model_name: Yuan-embedding-1.0
+    model_path: /mnt/models/Yuan-embedding-1.0
+    backend: sentence
+    gpu_ids: [0]
+    port: 8003
+    task_type: embedding
+    heartbeat_interval: 10
+  - model_name: bge-reranker-v2-m3
+    model_path: /mnt/models/bge-reranker-v2-m3
+    backend: sentence
+    gpu_ids: [0]
+    port: 8004
+    task_type: rerank
+    heartbeat_interval: 10

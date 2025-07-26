@@ -10,8 +10,12 @@ RUN pip install --upgrade pip \
 && pip install --no-deps /app/ichat/sglang_whls/*.whl \
 && pip install --no-deps /app/ichat/xinference_whls/* \
 && pip install --no-deps /app/ichat/mineru_whls/* \
+&& pip install --no-deps /app/ichat/ollama_whls/* \
 && pip install --ignore-installed flask flask_restful \
 && rm -rf /app/ichat/sglang_whls \
 && rm -rf /app/ichat/xinference_whls \
 && rm -rf /app/ichat/mineru_whls \
+&& rm -rf /app/ichat/ollama_whls \
 && pip cache purge
+
+RUN curl -fsSL https://ollama.com/install.sh | sh

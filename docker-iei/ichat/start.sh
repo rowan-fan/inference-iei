@@ -9,7 +9,7 @@
 replace_environments() {
   local param_name
   local param_value
-  local supported_params=(port gateway-config)
+  local supported_params=(port gateway-config ollama-enable)
   
   while [ -n "$1" ]; do
     param_name="${1#--}"  # Remove leading --
@@ -223,6 +223,61 @@ wait_for_ichat_gateway() {
   exit 1
 }
 
+# Start ollama server
+# Args:
+#   LOG_FILE: The log file path for server output, default is ollama.log
+# Returns: None
+start_ollama_server() {
+  local server_command="ollama serve"
+
+  echo "Starting ollama server..."
+  echo "Ollama log file: ${1:-ollama.log}"
+  echo "Executing command: $server_command"
+
+  $server_command 2>&1 | tee "${1:-ollama.log}" | sed 's/^/[OLLAMA] /' &
+
+  local server_pid=$!
+
+  sleep 2
+  if ps -p $server_pid > /dev/null; then
+    echo "Ollama server started successfully with PID $server_pid"
+  else
+    echo "Failed to start ollama server"
+    exit 1
+  fi
+}
+
+# Wait for ollama server to be ready
+# Args:
+#   PORT: The port number for the server, default is 11434
+#   MAX_RETRIES: Maximum number of retry attempts, default is 60
+#   RETRY_INTERVAL: Time interval between retries in seconds, default is 2
+# Returns: None
+wait_for_ollama_server() {
+  local port=${OLLAMA_PORT:-11434}
+  local URL="http://localhost:${port}"
+  local retries=0
+  local max_retries=${MAX_RETRIES:-60}
+  local retry_interval=${RETRY_INTERVAL:-2}
+
+  echo "Checking ollama server status at $URL"
+  while [ $retries -lt $max_retries ]; do
+    if response=$(curl --max-time 2 -s -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null); then
+      if [ "$response" -eq 200 ]; then
+        echo "Successfully connected to ollama server at $URL"
+        return 0
+      fi
+    fi
+
+    retries=$((retries + 1))
+    echo "Waiting for ollama server to be ready (attempt $retries/$max_retries)..."
+    sleep $retry_interval
+  done
+
+  echo "Error: Failed to connect to ollama server after $max_retries attempts"
+  exit 1
+}
+
 # Helper function to add argument if environment variable exists
 add_arg() {
   local var_name=$1
@@ -254,10 +309,13 @@ start_ichat_gateway
 # Step 3: Wait for the ichat gateway server to be ready
 wait_for_ichat_gateway
 
-# The following services are assumed to be managed by the gateway or run separately.
-# If they need to be started here, ensure the logic is correct.
+# Step 4: Check if ollama should be started and start it if enabled
+if [ "${OLLAMA_ENABLE:-false}" = true ]; then
+  start_ollama_server
+  wait_for_ollama_server
+fi
 
-# Step 4: Check if the sensitive model service should be started and start it if enabled
+# Step 5: Check if the sensitive model service should be started and start it if enabled
 if [ "${SENSITIVE_MODEL_ENABLE:-false}" = true ]; then
   echo "Starting sensitive service"
   python3 sensitive_server/sensitive_models_filtering_api.py --port "${SENSITIVE_SVC_PORT:-39998}" --model_path "${SENSITIVE_MODEL_PATH:-/mnt/inaisfs/loki/bussiness/embedding-models/Security_semantic_filtering}"  2>&1 | while IFS= read -r line; do
@@ -265,7 +323,7 @@ if [ "${SENSITIVE_MODEL_ENABLE:-false}" = true ]; then
   done &
 fi
 
-# Step 5: Check if the PDF parser service should be started and start it if enabled
+# Step 6: Check if the PDF parser service should be started and start it if enabled
 if [ "${PDF_PARSER_ENABLE:-false}" = true ]; then
   echo "Starting PDF parser service"
   python3 epaipdfparser/batch_analyze.py --port "${pdf_parser_port:-8877}" --device-type "${pdf_parser_device:-gpu}" --model-path "${pdf_parser_model_path:-/mnt/inaisfs/loki/bussiness/custom-models}"  2>&1 | while IFS= read -r line; do
@@ -273,7 +331,7 @@ if [ "${PDF_PARSER_ENABLE:-false}" = true ]; then
   done &
 fi
 
-# Step 6: Wait for all background processes to complete
+# Step 7: Wait for all background processes to complete
 wait
 
 # engine can be llama.cpp, vLLM, transformers, SGLang

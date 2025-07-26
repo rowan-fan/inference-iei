@@ -2,7 +2,7 @@
 import asyncio
 import signal
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 from argparse import Namespace
 
 # Assume that the execution environment is configured so that 'ichat' is a package.
@@ -40,25 +40,19 @@ def _signal_handler(*_: Any) -> None:
 
 
 @asynccontextmanager
-async def lifespan(backend: BaseBackend, framework_args: Namespace):
+async def lifespan(heartbeat_manager: Optional[HeartbeatManager]):
     """
     An asynchronous context manager to manage the lifecycle of the HeartbeatManager.
     It ensures that the heartbeat service is started and stopped cleanly along
     with the main application.
     """
-    heartbeat_manager = None
-    if getattr(framework_args, "gateway_address", None):
-        heartbeat_manager = HeartbeatManager(
-            framework_args=framework_args,
-            backend_args=backend.get_backend_args(),
-            backend_ready=backend.server_ready,
-        )
+    if heartbeat_manager:
         asyncio.create_task(heartbeat_manager.start())
 
     try:
         yield
     finally:
-        if heartbeat_manager:
+        if heartbeat_manager and not shutdown_event.is_set():
             print("INFO:     Stopping heartbeat manager...")
             await heartbeat_manager.stop()
 
@@ -81,19 +75,31 @@ async def main() -> None:
 
     # 3. Dynamically instantiate the specified inference backend.
     if framework_args.backend == "vllm":
-        from ..backends.vllm_backend import VLLMBackend
+        from ..backends.vllm.backend import VLLMBackend
         backend = VLLMBackend(framework_args, backend_argv, backend_ready_event)
     elif framework_args.backend == "sglang":
-        from ..backends.sglang_backend import SGLangBackend
+        from ..backends.sglang.backend import SGLangBackend
         backend = SGLangBackend(framework_args, backend_argv, backend_ready_event)
     elif framework_args.backend == "sentence":
-        from ..backends.sentence_backend.sentence_backend import SentenceBackend
+        from ..backends.sentence_transformer.backend import SentenceBackend
         backend = SentenceBackend(framework_args, backend_argv, backend_ready_event)
     else:
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
 
-    # 4. Run the main service within the lifespan context.
-    async with lifespan(backend, framework_args):
+    # 4. Get the final backend arguments for heartbeat payload after backend-specific parsing.
+    final_backend_args = backend.get_backend_args()
+
+    # 5. Initialize HeartbeatManager
+    heartbeat_manager = None
+    if getattr(framework_args, "gateway_address", None):
+        heartbeat_manager = HeartbeatManager(
+            framework_args=framework_args,
+            backend_args=final_backend_args,
+            backend_ready=backend.server_ready,
+        )
+
+    # 6. Run the main service within the lifespan context.
+    async with lifespan(heartbeat_manager):
         # Create tasks for the backend and for waiting on a shutdown signal.
         server_task = asyncio.create_task(backend.run())
         shutdown_task = asyncio.create_task(shutdown_event.wait())
@@ -106,13 +112,21 @@ async def main() -> None:
 
         # Check if the backend task is the one that completed
         if server_task in done:
-            # If the backend task finished, it could be a crash or a normal exit.
-            # We set the shutdown event regardless to ensure all other tasks stop.
+            # If the backend task finished, it might be a crash or a normal exit.
+            # If the backend wasn't ready, it's a startup failure.
+            if not backend.is_server_ready() and heartbeat_manager:
+                # This indicates a startup failure. Enter zombie mode.
+                await heartbeat_manager.enter_zombie_mode()
+                # The process will now hang here, sending 'terminating' heartbeats.
+                # It will only exit if the gateway/user kills it.
+                await asyncio.Event().wait()  # Wait indefinitely
+
+            # If it was a normal exit or post-startup crash, trigger graceful shutdown.
             if not shutdown_event.is_set():
                 print("INFO:     Backend task completed. Initiating graceful shutdown...")
                 shutdown_event.set()
         
-        # At this point, either the backend crashed or a shutdown signal was received.
+        # At this point, a graceful shutdown has been initiated.
         # All pending tasks must be cancelled.
         for task in pending:
             task.cancel()
@@ -134,6 +148,10 @@ async def main() -> None:
                 print("INFO:     Backend task was cancelled during shutdown.")
         else:
             print("INFO:     Shutdown signal received, server has stopped.")
+
+        # Final cleanup for the heartbeat manager if it was running
+        if heartbeat_manager and heartbeat_manager._heartbeat_task and not heartbeat_manager._heartbeat_task.done():
+            await heartbeat_manager.stop()
 
 
 if __name__ == "__main__":
