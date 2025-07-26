@@ -9,6 +9,7 @@ sglang_whls
 xinference_whls
 mineru_whls
 ollama_whls
+minivpmv-2.6
 
 # C extensions
 *.so

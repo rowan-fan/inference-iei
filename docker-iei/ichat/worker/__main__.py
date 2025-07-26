@@ -83,6 +83,9 @@ async def main() -> None:
     elif framework_args.backend == "sentence":
         from ..backends.sentence_transformer.backend import SentenceBackend
         backend = SentenceBackend(framework_args, backend_argv, backend_ready_event)
+    elif framework_args.backend == "ollama":
+        from ..backends.ollama.backend import OllamaBackend
+        backend = OllamaBackend(framework_args, backend_argv, backend_ready_event)
     else:
         raise ValueError(f"Unsupported backend: {framework_args.backend}")
 
@@ -166,4 +169,4 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Suppress exceptions that are expected during a graceful shutdown.
         print("INFO:     Main task cancelled. Exiting.")
-        pass 
+        pass

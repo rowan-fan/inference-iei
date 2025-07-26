@@ -9,7 +9,7 @@ server_settings:
 managed_workers:
   # - model_name: qwen
   #   model_path: /mnt/models/Qwen3-1.7B
-  #   backend: sglang
+  #   backend: vllm
   #   gpu_ids: [0]
   #   port: 8001
   #   heartbeat_interval: 10
@@ -17,24 +17,34 @@ managed_workers:
   #   context_length: 8192
   #   tensor_parallel_size: 1
   #   gpu_memory_utilization: 0.95
-  - model_name: bge-m3
-    model_path: /mnt/models/bge-m3
-    backend: sentence
-    gpu_ids: [0]
-    port: 8002
-    task_type: embedding
+  - model_name: minicpm-v:8b
+    model_path: cache
+    backend: ollama
+    port: 11434
+    # For Ollama, port is not needed as it connects to a running service.
+    # gpu_ids are also managed by the Ollama service itself.
     heartbeat_interval: 10
-  - model_name: Yuan-embedding-1.0
-    model_path: /mnt/models/Yuan-embedding-1.0
-    backend: sentence
-    gpu_ids: [0]
-    port: 8003
-    task_type: embedding
-    heartbeat_interval: 10
-  - model_name: bge-reranker-v2-m3
-    model_path: /mnt/models/bge-reranker-v2-m3
-    backend: sentence
-    gpu_ids: [0]
-    port: 8004
-    task_type: rerank
-    heartbeat_interval: 10
+    # Below are args passed to the Ollama backend
+    model: minicpm-v:8b # The model tag in Ollama
+    model_path: /path/to/your/model.gguf # Optional: path to a local model file
+  # - model_name: bge-m3
+  #   model_path: /mnt/models/bge-m3
+  #   backend: sentence
+  #   gpu_ids: [0]
+  #   port: 8002
+  #   task_type: embedding
+  #   heartbeat_interval: 10
+  # - model_name: Yuan-embedding-1.0
+  #   model_path: /mnt/models/Yuan-embedding-1.0
+  #   backend: sentence
+  #   gpu_ids: [0]
+  #   port: 8003
+  #   task_type: embedding
+  #   heartbeat_interval: 10
+  # - model_name: bge-reranker-v2-m3
+  #   model_path: /mnt/models/bge-reranker-v2-m3
+  #   backend: sentence
+  #   gpu_ids: [0]
+  #   port: 8004
+  #   task_type: rerank
+  #   heartbeat_interval: 10

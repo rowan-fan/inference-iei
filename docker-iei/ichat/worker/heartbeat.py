@@ -36,6 +36,13 @@ class HeartbeatManager:
         # Construct the payload once. It will be sent with each heartbeat.
         # This uses a mix of framework arguments (user intent) and backend
         # arguments (runtime values).
+        if isinstance(backend_args, Dict):
+            host = backend_args.get("host", "localhost")
+            port = backend_args.get("port")
+        else:
+            host = getattr(backend_args, "host", "localhost")
+            port = getattr(backend_args, "port", None)
+
         self.payload = {
             "worker_id": f"worker-{uuid.uuid4()}",
             "model_name": (
@@ -44,8 +51,8 @@ class HeartbeatManager:
             ),
             "model_path": framework_args.model_path,
             "backend": framework_args.backend,
-            "host": backend_args.get("host"),
-            "port": backend_args.get("port"),
+            "host": host,
+            "port": port,
         }
 
         self._session: Optional[aiohttp.ClientSession] = None
@@ -181,4 +188,4 @@ class HeartbeatManager:
         # Send heartbeats indefinitely to signal a persistent failure.
         while True:
             await self._send_heartbeat(state=self.state)
-            await asyncio.sleep(self.heartbeat_interval) 
+            await asyncio.sleep(self.heartbeat_interval)

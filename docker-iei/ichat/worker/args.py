@@ -26,7 +26,7 @@ def parse_worker_args():
         type=str,
         required=False,
         default="vllm",
-        choices=["vllm", "sglang", "sentence"],
+        choices=["vllm", "sglang", "sentence", "ollama"],
         help="The inference backend to use.",
     )
     ichat_group.add_argument(

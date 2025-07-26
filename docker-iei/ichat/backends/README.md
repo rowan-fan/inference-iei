@@ -42,6 +42,14 @@ iChat 的 `backends` 目录负责封装和管理底层的推理引擎。每个�
 
 详见 [sentence_transformer/README.md](./sentence_transformer/README.md)
 
+### 3.4 Ollama Backend
+
+详见 [ollama/README.md](./ollama/README.md)
+
+- 封装 Ollama 服务，通过 `ollama-python` 与之交互。
+- 支持模型缓存检查、本地模型文件导入（GGUF, SafeTensors）。
+- 适用于已独立部署 Ollama 服务的场景。
+
 - 封装 `sentence-transformers` 库，提供文本嵌入（embedding）和重排序（rerank）服务。
 - 独立参数解析，支持 embedding/rerank 两种任务。
 - 以 FastAPI+Uvicorn 方式服务化，支持 OpenAI 兼容 API（如 `/v1/embeddings`、`/v1/rerank`）。
@@ -54,6 +62,7 @@ iChat 的 `backends` 目录负责封装和管理底层的推理引擎。每个�
 | vLLM           | LLM推理         | 直接集成API/Socket | /health + RPC存活检查    | OpenAI兼容             |
 | SGLang         | LLM推理         | 直接集成API/多子进程 | /get_model_info + 子进程监控 | OpenAI兼容             |
 | Sentence       | 嵌入/重排序     | FastAPI子进程      | /health + 进程监控        | /v1/embeddings, /v1/rerank |
+| Ollama         | LLM推理         | `ollama-python` 客户端 | API连接 + 模型存在性检查 | OpenAI兼容             |
 
 ## 5. 配置与扩展
 
