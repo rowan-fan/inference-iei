@@ -97,6 +97,12 @@ class WorkerManager:
             "port": config.get("port"),
             "heartbeat-interval": config.get("heartbeat_interval"),
         }
+
+        gpu_ids = config.get("gpu_ids")
+        if gpu_ids is not None:
+            import json
+            framework_args["gpu-ids"] = json.dumps(gpu_ids)
+
         for key, value in framework_args.items():
             if value is not None:
                 cmd.extend([f"--{key}", str(value)])

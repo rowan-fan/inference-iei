@@ -74,6 +74,12 @@ def parse_worker_args():
         default=None,
         help="The path to the model weights.",
     )
+    ichat_group.add_argument(
+        "--gpu-ids",
+        type=str, # Receive as a JSON string
+        default="[]",
+        help="A JSON string representing the list of GPU IDs to use.",
+    )
 
 
 
@@ -92,6 +98,7 @@ def parse_worker_args():
         "port": "--port",
         "served_model_name": "--served-model-name",
         "model_path": "--model-path",
+        "gpu_ids": "--gpu-ids",
     }
 
     for arg_dest, arg_flag in shared_args.items():
@@ -106,5 +113,9 @@ def parse_worker_args():
             is_present = any(arg.startswith(arg_flag) for arg in backend_argv)
             if not is_present:
                 backend_argv.extend([arg_flag, str(arg_value)])
+    
+    # Post-process gpu_ids from JSON string to list
+    import json
+    framework_args.gpu_ids = json.loads(framework_args.gpu_ids)
 
     return framework_args, backend_argv 

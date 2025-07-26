@@ -44,10 +44,25 @@ class SentenceBackend(BaseBackend):
         args_dict["model_name"] = self.framework_args.served_model_name
         args_dict["log_level"] = self.framework_args.log_level
 
+        # Determine device from gpu_ids. This overrides any --device in backend_argv.
+        gpu_ids = self.framework_args.gpu_ids
+        if not gpu_ids:
+            device = "cpu"
+        elif len(gpu_ids) == 1:
+            device = f"cuda:{gpu_ids[0]}"
+        else:
+            raise ValueError(f"SentenceBackend supports at most one GPU, but got gpu_ids={gpu_ids}")
+        args_dict["device"] = device
+
         # The `api_server` does not accept `--served-model-name`, but `--model-name`.
         # We have already mapped it, so we can remove the original passthrough argument.
         if "served_model_name" in args_dict:
             del args_dict["served_model_name"]
+
+        # The `api_server` does not accept `--gpu-ids`, but `--device`.
+        # We have already mapped it, so we can remove the original passthrough argument.
+        if "gpu_ids" in args_dict:
+            del args_dict["gpu_ids"]
 
         # Remove None values so they don't get passed as "None" string
         return {k: v for k, v in args_dict.items() if v is not None}
