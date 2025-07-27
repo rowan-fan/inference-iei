@@ -80,7 +80,7 @@ class HeartbeatManager:
 
         try:
             # The first heartbeat acts as registration.
-            # print(f"INFO:     Sending heartbeat for worker {self.payload['worker_id']} with state '{state}'...")
+            print(f"INFO:     Sending heartbeat for worker {self.payload['worker_id']} with state '{state}'...")
             async with session.post(heartbeat_url, json=payload, timeout=10) as response:
                 if response.status != 200:
                     text = await response.text()

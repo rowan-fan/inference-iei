@@ -17,16 +17,20 @@ managed_workers:
   #   context_length: 8192
   #   tensor_parallel_size: 1
   #   gpu_memory_utilization: 0.95
-  - model_name: minicpm-v:8b
-    model_path: cache
+  # - model_name: minicpm-v:8b
+  #   model_path: cache
+  #   backend: ollama
+  #   port: 11434
+  #   # For Ollama, port is not needed as it connects to a running service.
+  #   # gpu_ids are also managed by the Ollama service itself.
+  #   heartbeat_interval: 10
+  - model_name: gemma2
+    model_path: /mnt/models/gemma2
     backend: ollama
     port: 11434
     # For Ollama, port is not needed as it connects to a running service.
     # gpu_ids are also managed by the Ollama service itself.
     heartbeat_interval: 10
-    # Below are args passed to the Ollama backend
-    model: minicpm-v:8b # The model tag in Ollama
-    model_path: /path/to/your/model.gguf # Optional: path to a local model file
   # - model_name: bge-m3
   #   model_path: /mnt/models/bge-m3
   #   backend: sentence

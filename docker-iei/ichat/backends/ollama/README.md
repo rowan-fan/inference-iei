@@ -42,9 +42,12 @@
 - 根据 `model_path` 动态生成一个 `Modelfile` 的内容。
 - `Modelfile` 的核心指令是 `FROM {model_path}`，它指示 Ollama 从指定的本地文件系统路径加载模型。
 - 调用 `self.client.create(model=model_name, modelfile=...)` 来根据 `Modelfile` 创建并注册一个新模型。
+- **注意**：最新版本的 `ollama-python` 库允许直接在 `create` 方法中使用 `modelfile` 字符串，无需创建临时文件。
 
 ### 3.5 `cleanup(self)`
-- 该方法用于在服务关闭时执行必要的清理工作。对于 `OllamaBackend`，由于不直接管理 Ollama 进程，此方法可能为空或只包含取消内部任务的逻辑。
+- 该方法用于在服务关闭时执行必要的清理工作。
+- 如果模型是由 `OllamaBackend` 加载的（无论是通过拉取还是从文件创建），`cleanup` 方法会异步删除该模型，以避免在 Ollama 中留下不必要的缓存。
+- 通过 `asyncio.create_task` 调度一个异步清理任务，以防止阻塞主关闭流程。
 
 ## 4. 伪代码架构
 
@@ -92,14 +95,18 @@ class OllamaBackend(BaseBackend):
             print(f"Pulling model '{model_name}' from Ollama Hub...")
             await self.client.pull(model_name)
 
-    async def _create_from_file(self, model_name, model_path):
+        async def _create_from_file(self, model_name, model_path):
         modelfile = f'FROM {model_path}'
         await self.client.create(model=model_name, modelfile=modelfile)
+        self.model_loaded_by_backend = True
         print(f"Successfully created model '{model_name}'.")
 
     def cleanup(self):
         print("Cleaning up Ollama backend.")
-        # No process to kill, just cancel tasks if any.
+        if self.model_loaded_by_backend:
+            print(f"Deleting model '{self.ollama_args.model}' from Ollama.")
+            asyncio.create_task(self.client.delete(model=self.ollama_args.model))
+        self.shutdown_event.set()
 ```
 
 ## 5. 配置与集成

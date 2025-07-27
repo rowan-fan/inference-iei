@@ -73,7 +73,7 @@ class LogStreamer:
         """
         Formats a log record into a string, similar to a standard Formatter.
         """
-        return f"[{record.levelname}] {record.getMessage()}"
+        return f"[{record.filename}:{record.lineno}] {record.getMessage()}"
 
     def start(self):
         """Starts the log streaming task in the background."""
@@ -121,7 +121,7 @@ def setup_logging(
     # Configure console logging
     console_handler = logging.StreamHandler()
     console_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        "%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s"
     )
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
