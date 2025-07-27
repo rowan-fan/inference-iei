@@ -64,55 +64,71 @@ class OllamaBackend(BaseBackend):
             logger.warning(f"Could not check model list. Proceeding with pull/create. Error: {e}")
 
         # If model_path is provided and not a dummy value, create from file.
-        if self.ollama_args.model_path and self.ollama_args.model_path.lower() not in ['cache', 'none', 'null', '']:
-            logger.info(f"Creating model '{model_name}' from path '{self.ollama_args.model_path}'...")
-            await self._create_from_file(model_name, self.ollama_args.model_path)
-            self.model_loaded_by_backend = True
-            return
+        # if self.ollama_args.model_path and self.ollama_args.model_path.lower() not in ['cache', 'none', 'null', '']:
+        #     logger.info(f"Creating model '{model_name}' from path '{self.ollama_args.model_path}'...")
+        #     await self._create_from_file(model_name, self.ollama_args.model_path)
+        #     self.model_loaded_by_backend = True
+        #     return
 
         # If not found locally, pull from the hub.
         logger.info(f"Pulling model '{model_name}' from Ollama Hub...")
         await self.client.pull(model_name)
         self.model_loaded_by_backend = True
 
-    async def _create_from_file(self, model_name: str, model_path: str):
-        try:
-            # 获取目录下所有文件
-            file_names = [
-                f for f in os.listdir(model_path)
-                if os.path.isfile(os.path.join(model_path, f))
-            ]
-            if not file_names:
-                raise RuntimeError(f"Directory '{model_path}' contains no files and no Modelfile.")
+    # async def _create_from_file(self, model_name: str, model_path: str):
+    #     try:
+    #         # 获取目录下所有文件
+    #         file_names = [
+    #             f for f in os.listdir(model_path)
+    #             if os.path.isfile(os.path.join(model_path, f))
+    #         ]
+    #         if not file_names:
+    #             raise RuntimeError(f"Directory '{model_path}' contains no files and no Modelfile.")
 
-            # 创建文件字典，包含文件名和SHA256摘要
-            files_dict = {}
-            for file_name in file_names:
-                file_path = os.path.join(model_path, file_name)
-                # 计算文件的SHA256摘要
-                sha256_hash = hashlib.sha256()
-                with open(file_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(4096), b""):
-                        sha256_hash.update(chunk)
-                files_dict[file_name] = f"sha256:{sha256_hash.hexdigest()}"
-
-            # 保存当前工作目录
-            original_cwd = os.getcwd()
-            try:
-                # 切换到model_path目录
-                os.chdir(model_path)
-                await self.client.create(
-                    model=model_name,
-                    files=files_dict,
-                    stream=False,
-                )
-            finally:
-                # 恢复原始工作目录
-                os.chdir(original_cwd)
+    #         # 创建文件字典，包含文件名和SHA256摘要
+    #         files_dict = {}
+    #         for file_name in file_names:
+    #             file_path = os.path.join(model_path, file_name)
+    #             # 计算文件的SHA256摘要
+    #             sha256_hash = hashlib.sha256()
+    #             with open(file_path, "rb") as f:
+    #                 for chunk in iter(lambda: f.read(4096), b""):
+    #                     sha256_hash.update(chunk)
+    #             digest = sha256_hash.hexdigest()
+    #             files_dict[file_name] = f"sha256:{digest}"
                 
-            logger.info(f"Successfully created model '{model_name}' from files in '{model_path}'.")
-        except Exception as e:
-            raise RuntimeError(f"Failed to create model from directory '{model_path}'. Error: {e}")
+    #             # 推送文件到Ollama服务器创建blob
+    #             logger.info(f"Pushing file '{file_name}' to Ollama server...")
+    #             try:
+    #                 with open(file_path, "rb") as f:
+    #                     response = await self.client._request(
+    #                         method="POST",
+    #                         url=f"/api/blobs/sha256:{digest}",
+    #                         data=f.read()
+    #                     )
+    #                 logger.info(f"Successfully pushed file '{file_name}' as blob.")
+    #             except Exception as e:
+    #                 logger.error(f"Failed to push file '{file_name}' as blob: {e}")
+    #                 raise
+
+    #         # 保存当前工作目录
+    #         original_cwd = os.getcwd()
+    #         try:
+    #             # 切换到model_path目录
+    #             os.chdir(model_path)
+                
+    #             await self.client.create(
+    #                 model=model_name,
+    #                 files=files_dict,
+    #                 stream=False,
+    #             )
+    #         finally:
+    #             # 恢复原始工作目录
+    #             os.chdir(original_cwd)
+                
+    #         logger.info(f"Successfully created model '{model_name}' from files in '{model_path}'.")
+    #     except Exception as e:
+    #         raise RuntimeError(f"Failed to create model from directory '{model_path}'. Error: {e}")
 
 
     def cleanup(self):
